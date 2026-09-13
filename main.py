@@ -126,6 +126,15 @@ CONFIG_FILE = "config.json"
 # does is not the day to start asking.
 DEVICE_TYPE = "esp32"
 
+# What this build is. Reported on every check-in, so the portal can say which
+# modules are behind rather than only that an update happened.
+#
+# Bumped by hand when the firmware changes in a way a module would notice.
+# The Pi reads this same line out of the copy it fetched from GitHub, which is
+# how "update available" is decided - so the string has to stay easy to find:
+# one line, plain quotes, nothing computed.
+FIRMWARE_VERSION = "1.1.0"
+
 # Where `POST /update` fetches new firmware from when it is not told
 # otherwise. Set it per module in config.json ("firmware_url"), or pass a url
 # with the request - the Pi does, which is how one button updates a fleet.
@@ -587,6 +596,7 @@ def announce_to_pi(wlan, config, switches):
 
     payload = {
         "device_type": device_type(config),
+        "firmware_version": FIRMWARE_VERSION,
         "smart_switch_id": smart_switch_id(config),
         "ip": wlan.ifconfig()[0],
         "name": config["name"],
@@ -774,6 +784,7 @@ def state_payload(config, switches, ip):
     return {
         "name": config["name"],
         "device_type": device_type(config),
+        "firmware_version": FIRMWARE_VERSION,
         "ip": ip,
         "smart_switch_id": smart_switch_id(config),
         "max_switches": MAX_SWITCHES,
@@ -819,6 +830,7 @@ class Server:
         return json_response({
             "device": "buddy-switch",
             "device_type": device_type(self.config),
+            "firmware_version": FIRMWARE_VERSION,
             "name": self.config["name"],
             "smart_switch_id": smart_switch_id(self.config),
             "provisioned": is_provisioned(self.config),
@@ -915,7 +927,7 @@ class Server:
 
         self.reboot_after_reply = True
         return json_response({"ok": True, "bytes": size, "sha256": digest,
-                              "from": url})
+                              "from": url, "was": FIRMWARE_VERSION})
 
     def configure_switches(self, body):
         """Sets how many relays this module drives."""
@@ -1055,8 +1067,14 @@ def main():
     wlan = join_wifi(config) if is_provisioned(config) else None
     waiting_on_hotspot = False
 
-    if wlan is None and not is_provisioned(config):
-        # Unclaimed. Go looking for the Pi rather than waiting to be found.
+    if wlan is None:
+        # Either unclaimed, or claimed and unable to join the network it was
+        # given. Both look the same from here and both have the same answer:
+        # go and find the Pi. A module stranded on its own access point is a
+        # module the one command that would fix it cannot reach.
+        if is_provisioned(config):
+            print("could not join '%s' - falling back to the Pi's network"
+                  % config.get("wifi_ssid", ""))
         wlan = join_setup_hotspot()
         if wlan is not None:
             waiting_on_hotspot = True
@@ -1113,10 +1131,12 @@ def main():
                 # portal forgets us while somebody is still deciding.
                 announce_to_pi(wlan, config, switches)
 
-            elif not is_provisioned(config):
-                # Unclaimed and on our own access point. The Pi's hotspot may
-                # have come up since we last looked — it is usually switched
-                # on at the moment somebody presses "Find new boards".
+            elif wlan is None:
+                # On our own access point, claimed or not. The Pi's network
+                # may have come up since we last looked - it is usually
+                # switched on at the moment somebody goes looking for
+                # modules, and a module that stopped retrying would be one
+                # that needs a person with a cable.
                 found = join_setup_hotspot(timeout=6)
                 if found is not None:
                     wlan = found
@@ -1155,7 +1175,8 @@ def banner(config, switches, ip):
     print("")
     print("=" * 52)
     print("  NAME     : %s" % config["name"])
-    print("  TYPE     : %s" % device_type(config))
+    print("  TYPE     : %s   (firmware %s)"
+          % (device_type(config), FIRMWARE_VERSION))
     print("  ID       : %s" % (smart_switch_id(config) or "-"))
     print("  IP       : %s   (the Pi calls it by name, not this)" % ip)
     print("  PI       : %s" % (config.get("pi_url") or "not set"))
