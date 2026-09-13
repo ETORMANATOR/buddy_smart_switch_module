@@ -6,6 +6,7 @@ driving up to six mains switches, talked to by name from a Raspberry Pi.
 ```
 device/
   esp32/          ESP32-C3 — main.py, config.example.json, CONFIG.md
+  esp8266/        ESP8266 — main.py, config.example.json, CONFIG.md
 ```
 
 One folder per kind of hardware, and the folder name is the `device_type` a
@@ -66,11 +67,12 @@ written against that name survives somebody relabelling things.
  "sha256": "<hex digest of that file>"}
 ```
 
-The normal route is the portal's **update firmware** button. The Pi fetches
-the build for that module's type, checks it is firmware rather than a 404
-page, and tells the module to download it **from the Pi** with the sha256 of
-what the Pi actually got. The module refuses anything whose hash differs,
-refuses anything that does not look like firmware, and keeps the previous
+The normal route is the portal's **Update** button on a Connected BSSM card.
+The Pi fetches the build for that module's type, checks it is firmware
+rather than a 404 page, and tells the module to download it **from the Pi**
+with the sha256 of what the Pi actually got. The module refuses anything
+whose hash differs, refuses anything that does not look like firmware, and
+keeps the previous
 copy as `main.bak`.
 
 The round trip is deliberate. These chips can do TLS but have no trust store
@@ -81,7 +83,16 @@ trusts only a hash from the Pi it already shares a key with.
 ## Adding another kind of hardware
 
 Add `device/<type>/main.py`, have it report that `device_type`, and the
-update endpoint finds it without anything else changing. The pin map belongs
-in the firmware: an ESP8266's usable relay pins are 4, 5, 12, 13, 14 — the
-ESP32-C3's list would land on its flash and strapping pins, which is a module
-that does not boot.
+update endpoint finds it without anything else changing — `device/esp8266/`
+is exactly this, added after `device/esp32/` with no change needed anywhere
+else. The pin map belongs in the firmware: the ESP8266 build's usable relay
+pins are 4, 5, 12, 13, 14 — the ESP32-C3's list would land on its flash and
+strapping pins, which is a module that does not boot.
+
+`device/esp8266/main.py` was ported from the ESP32-C3 build rather than
+written fresh — the MicroPython WiFi and socket APIs it depends on are the
+same on both chips — but has not yet been flashed to real ESP8266 hardware
+the way the ESP32-C3 one has been exercised at length. Treat its own header
+comment's RF notes as inherited assumptions, not measurements, until someone
+chases a real join failure on this chip the way the ESP32-C3 section's was
+chased.
