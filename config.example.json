@@ -1,5 +1,5 @@
 {
-  "serial": "SW-000412",
+  "smart_switch_id": "SW-ec3e01d2-0ea9-407e-9136-ca1303372385",
   "name": "living_room",
   "location": "Living room, behind the TV",
   "switches": ["tv_socket", "floor_lamp", "fan", "spare"],
@@ -7,5 +7,6 @@
   "wifi_pass": "",
   "pi_url": "http://192.168.1.242:8000",
   "device_key": "",
+  "firmware_url": "",
   "provisioned": false
 }

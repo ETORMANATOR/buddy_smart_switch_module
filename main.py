@@ -16,10 +16,10 @@
 #
 # Three ways to put it there, all writing the same file:
 #
-#   * `python esp32/setup_over_usb.py --id SW-000412 --name living_room`
-#     over the cable already plugged in — see esp32/config.example.json.
-#   * The Pi's portal, once the module is adopted: the ID & name button.
-#   * By hand: `mpremote fs cp my_config.json :config.json`.
+#   * `mpremote connect COM4 fs cp my_config.json :config.json`, over the
+#     cable already plugged in — see config.example.json next to this file.
+#   * Adoption from the Pi's portal, which hands the module a network, an
+#     address to report to and a key of its own — but never a name.
 #
 # A module with neither set has no identity and will not report to the Pi:
 # nothing here makes one up. An id typed into THIS file instead would be
@@ -50,8 +50,8 @@
 # (`Buddy-Setup-XXXX`) so it is reachable by something, and keeps checking for
 # the Pi every twenty seconds.
 #
-# Setting a board up over its USB cable — `esp32/setup_over_usb.py` — skips
-# all of this and is the quickest route when the board is already plugged in.
+# Writing a config.json over the USB cable skips all of this, and is the
+# quickest route when the module is already plugged in — see CONFIG.md.
 #
 # ------------------------------------------- what the radio will and won't do
 # Measured on an ESP32-C3, MicroPython v1.27.0, against a Raspberry Pi
@@ -126,7 +126,7 @@ CONFIG_FILE = "config.json"
 #
 # Written as a raw file URL, because that is what serves the file itself
 # rather than a page about it.
-FIRMWARE_URL = ""
+FIRMWARE_URL = ("https://raw.githubusercontent.com/ETORMANATOR/buddy_smart_switch_module/main/main.py")
 
 # Kept beside the running firmware after an update, so a module that comes
 # back broken can be put back the way it was over USB with one copy.
@@ -1072,9 +1072,9 @@ def main():
               % (smart_switch_id(config) or "(not set)"))
         print("  name            : %s"
               % (config.get("name") or "(not set)"))
-        print("  Set both in config.json - over USB with")
-        print("  esp32/setup_over_usb.py, or by being adopted from the")
-        print("  portal. Until then this module will not report to the Pi.")
+        print("  Set both in config.json, over USB:")
+        print("    mpremote fs cp my_config.json :config.json")
+        print("  Until then this module will not report to the Pi.")
         print("=" * 52)
         print("")
 
