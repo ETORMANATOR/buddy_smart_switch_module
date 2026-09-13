@@ -86,6 +86,7 @@
 
 import json
 import os
+import sys
 import socket
 import time
 
@@ -124,7 +125,7 @@ CONFIG_FILE = "config.json"
 # of module from another without guessing from the shape of the reply - a
 # fleet gets more than one kind of hardware in it eventually, and the day it
 # does is not the day to start asking.
-DEVICE_TYPE = "esp32"
+DEVICE_TYPE = "esp8266" if sys.platform == "esp8266" else "esp32"
 
 # What this build is. Reported on every check-in, so the portal can say which
 # modules are behind rather than only that an update happened.
@@ -147,12 +148,31 @@ FIRMWARE_URL = ("https://raw.githubusercontent.com/ETORMANATOR/buddy_smart_switc
 # back broken can be put back the way it was over USB with one copy.
 FIRMWARE_BACKUP = "main.bak"
 
-# Relay GPIOs in the order switches are handed out. Six, and no more.
-SWITCH_PINS = (1, 3, 4, 5, 6, 7)
-MAX_SWITCHES = len(SWITCH_PINS)
+# Relay GPIOs in the order switches are handed out, per chip.
+#
+# ESP32-C3: 1, 3, 4, 5, 6, 7. Not 11-17 (flash), 18/19 (USB), 20/21 (serial),
+# and not 2, 8, 9 - strapping pins that change how the chip boots.
+#
+# ESP8266 (ESP-12E/F, the ESP8266MOD): 4, 5, 12, 13, 14. Not 6-11 (flash),
+# and not 0, 2, 15 - held the wrong way at power-up, the chip boots into
+# flash mode or not at all, which looks like a dead module. 16 is left out
+# too: it is a different kind of pin with no pull-up and no interrupt, and
+# a relay on it behaves differently from the other four for no gain.
+#
+# So five relays on an ESP8266 and six on a C3. The Pi reads the number from
+# the module rather than assuming, which is why a mixed fleet works.
+if sys.platform == "esp8266":
+    SWITCH_PINS = (4, 5, 12, 13, 14)
+    RESET_PIN = 0                  # the FLASH button on most boards
+    STATUS_LED_PIN = 2             # onboard LED, and wired active-low
+    LED_ON, LED_OFF = 0, 1
+else:
+    SWITCH_PINS = (1, 3, 4, 5, 6, 7)
+    RESET_PIN = 0
+    STATUS_LED_PIN = 10
+    LED_ON, LED_OFF = 1, 0
 
-RESET_PIN = 0
-STATUS_LED_PIN = 10
+MAX_SWITCHES = len(SWITCH_PINS)
 
 # Most relay boards energise on HIGH. Low-trigger boards want these swapped.
 RELAY_ON, RELAY_OFF = 1, 0
@@ -1039,7 +1059,8 @@ def main():
     switches = Switches(switch_names(config["switch_count"]),
                         config.get("states"), remember)
 
-    led = Pin(STATUS_LED_PIN, Pin.OUT, value=0) if STATUS_LED_PIN is not None else None
+    led = (Pin(STATUS_LED_PIN, Pin.OUT, value=LED_OFF)
+           if STATUS_LED_PIN is not None else None)
     try:
         button = Pin(RESET_PIN, Pin.IN, Pin.PULL_UP)
     except ValueError:
@@ -1083,7 +1104,7 @@ def main():
     if wlan is not None:
         server.ip = wlan.ifconfig()[0]
         if led:
-            led.value(1)
+            led.value(LED_ON)
         if waiting_on_hotspot:
             print("")
             print("=" * 52)
