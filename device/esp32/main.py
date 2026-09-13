@@ -133,7 +133,7 @@ DEVICE_TYPE = "esp32"
 # The Pi reads this same line out of the copy it fetched from GitHub, which is
 # how "update available" is decided - so the string has to stay easy to find:
 # one line, plain quotes, nothing computed.
-FIRMWARE_VERSION = "1.6.0"
+FIRMWARE_VERSION = "1.7.0"
 
 # Where `POST /update` fetches new firmware from when it is not told
 # otherwise. Set it per module in config.json ("firmware_url"), or pass a url
@@ -407,104 +407,6 @@ class Switches:
 
 # ------------------------------------------------------------ networking --
 
-def start_ap(config):
-    """The setup network, for a board nobody has claimed yet.
-
-    Reports what the radio actually ended up doing rather than what it was
-    asked to do. The first version printed a confident banner before checking
-    anything, so a board whose access point never came up looked identical to
-    one broadcasting perfectly — and the Pi simply never found it.
-    """
-    # Named after the module when it has a name, and plainly when it does
-    # not. Two un-named modules powered up in one room will raise the same
-    # access point, which is a good reason to set them up one at a time.
-    #
-    # Capped at 32 bytes - the 802.11 SSID limit - because the radio enforces
-    # it silently otherwise: ask for a longer one and it comes up truncated,
-    # with no error, and the check just below (which compares what came up
-    # against what was asked for) would then report a false "did not start"
-    # for an access point that is actually fine, just shorter than intended.
-    prefix = "Buddy-Setup-"
-    if config.get("name"):
-        ssid = (prefix + config["name"])[:32]
-    else:
-        ssid = "Buddy-Setup"
-
-    # The station interface is put to sleep first. Leaving it active while the
-    # access point starts makes some ESP32-C3 builds bring the AP up on the
-    # station's channel, or not at all.
-    try:
-        sta = network.WLAN(network.STA_IF)
-        if sta.active():
-            sta.active(False)
-            time.sleep(0.3)
-    except Exception:
-        pass
-
-    ap = network.WLAN(network.AP_IF)
-    ap.active(False)
-    time.sleep(0.3)
-
-    # Named before the radio comes up *and* after it: builds disagree about
-    # which order works, and doing both is harmless.
-    #
-    # The attempts are kept quiet and only reported if the last one fails.
-    # This chip refuses to be named before its radio is active, so the first
-    # attempt always raises - printing that made every healthy boot carry an
-    # error message, which is how a real one goes unread.
-    secured = False
-    trouble = []
-    for when in ("before", "after"):
-        if when == "after":
-            ap.active(True)
-            time.sleep(0.5)
-        try:
-            ap.config(essid=ssid, password=PROVISION_KEY, authmode=3)
-            secured = True
-            trouble = []
-        except Exception as exc:
-            try:
-                ap.config(essid=ssid)
-                trouble = ["access point is open - no password (%s)" % exc]
-            except Exception as inner:
-                trouble.append("could not name it %s the radio was active: %s"
-                               % (when, inner))
-    for line in trouble:
-        print(line)
-
-    if not ap.active():
-        ap.active(True)
-        time.sleep(0.5)
-
-    # What the chip says, not what it was told.
-    try:
-        actual = ap.config("essid")
-    except Exception:
-        actual = "?"
-    try:
-        address = ap.ifconfig()[0]
-    except Exception:
-        address = "?"
-
-    print("")
-    print("=" * 52)
-    if ap.active() and actual == ssid:
-        print("  UNCLAIMED — waiting to be set up")
-        print("  SSID     : %s%s" % (actual, "" if secured else "   (open!)"))
-        print("  ADDRESS  : %s" % address)
-        print("  Join it from the Pi's portal and enter the setup key.")
-    else:
-        # Said plainly, because this is the state that looks like a working
-        # board and is not one.
-        print("  ACCESS POINT DID NOT START")
-        print("  active   : %s" % ap.active())
-        print("  essid    : %s   (wanted %s)" % (actual, ssid))
-        print("  Nothing will find this board until that says otherwise.")
-    print("=" * 52)
-    print("")
-    return ap
-
-
 def status_in_words(code):
     """What a station status code means, in a sentence rather than a number.
 
@@ -552,12 +454,10 @@ def join_setup_hotspot(timeout=HOTSPOT_JOIN_SECONDS):
     "the network is right there and the join failed" is a real state, and it
     means the module is too far away, not that anything is misconfigured.
     """
-    # Our own access point comes down first, and this is not optional: an
-    # ESP32 running as both an access point and a station must have the two
-    # on the *same channel*, so while our AP is up the station simply cannot
-    # associate to a Pi that chose a different one. Measured - with the AP
-    # left up the attempt sat at "connecting" forever; with it down the very
-    # next attempt reached authentication.
+    # Nothing of our own is broadcasting any more, but the interface is put
+    # down anyway: a station and an access point on one radio must share a
+    # channel, and a leftover AP from an earlier firmware would still be
+    # holding this one to the wrong one.
     try:
         ap = network.WLAN(network.AP_IF)
         if ap.active():
@@ -870,7 +770,7 @@ class Server:
     def __init__(self, config, switches):
         self.config = config
         self.switches = switches
-        self.ip = "192.168.4.1"
+        self.ip = ""            # nothing to answer on until it joins
         self.reboot_after_reply = False
 
     # -- helpers ----------------------------------------------------------
@@ -1161,18 +1061,26 @@ def main():
         else:
             banner(config, switches, server.ip)
     else:
-        # Neither the Pi's network nor our own credentials. Raise an access
-        # point so the board is reachable by *something*, and keep trying the
-        # Pi from the loop below.
-        start_ap(config)
-        server.ip = "192.168.4.1"
+        # Nothing found. The module keeps looking from the loop below - there
+        # is one setup network, it is the Pi's, and raising a second one of
+        # our own only ever added a name to be confused by: the Pi cannot
+        # join it. Measured, both directions, with the board on the desk
+        # beside the Pi.
+        print("")
+        print("=" * 52)
+        print("  UNCLAIMED - no network yet")
+        print("  Looking for '%s' every %d seconds."
+              % (SETUP_HOTSPOT_SSID, HEARTBEAT_SECONDS))
+        print("  Open a setup window from the Pi's portal to raise it.")
+        print("=" * 52)
+        print("")
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind(("0.0.0.0", 80))
     sock.listen(4)
     sock.settimeout(1)          # so the loop can watch the button and the clock
-    print("listening on %s:80" % server.ip)
+    print("listening on %s:80" % (server.ip or "no address yet"))
 
     held_since = None
     last_beat = 0
