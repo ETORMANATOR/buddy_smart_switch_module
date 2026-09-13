@@ -447,17 +447,7 @@ def signal_of(wlan, ssid):
 
 
 def join_setup_hotspot(timeout=HOTSPOT_JOIN_SECONDS):
-    """Joins the Pi's own network, if it is in range. None when it is not.
-
-    Reports what it saw either way. A module can hear a Pi long before a Pi
-    can hear the module - the Pi's radio is the stronger of the two - so
-    "the network is right there and the join failed" is a real state, and it
-    means the module is too far away, not that anything is misconfigured.
-    """
-    # Nothing of our own is broadcasting any more, but the interface is put
-    # down anyway: a station and an access point on one radio must share a
-    # channel, and a leftover AP from an earlier firmware would still be
-    # holding this one to the wrong one.
+    """Joins the Pi's own network, if it is in range. None when it is not."""
     try:
         ap = network.WLAN(network.AP_IF)
         if ap.active():
@@ -476,18 +466,19 @@ def join_setup_hotspot(timeout=HOTSPOT_JOIN_SECONDS):
     wlan.active(False)
     time.sleep(0.4)
     wlan.active(True)
-    # The radio needs longer than feels reasonable before it can scan: at
-    # half a second the first scan comes back empty even standing next to
-    # the access point, which reads exactly like being out of range.
+    
+    # --- POWER SAVING FIX ---
+    try:
+        wlan.config(pm=wlan.PM_NONE)
+    except Exception:
+        pass
     time.sleep(2)
 
     rssi = signal_of(wlan, SETUP_HOTSPOT_SSID)
     if rssi is None:
-        print("The Pi's network (%s) is not on the air here."
-              % SETUP_HOTSPOT_SSID)
+        print("The Pi's network (%s) is not on the air here." % SETUP_HOTSPOT_SSID)
     else:
-        print("The Pi's network is here at %d dBm%s"
-              % (rssi, " - weak" if rssi < -75 else ""))
+        print("The Pi's network is here at %d dBm%s" % (rssi, " - weak" if rssi < -75 else ""))
 
     print("Joining", end="")
     try:
@@ -513,9 +504,6 @@ def join_setup_hotspot(timeout=HOTSPOT_JOIN_SECONDS):
     print(" no")
     print("  why: %s" % status_in_words(code))
     if rssi is not None:
-        # The asymmetry that wastes the most time. Measured on this setup:
-        # the module heard the Pi at -68 dBm while the Pi could not hear the
-        # module at all, and every attempt sat at "associating".
         print("  The module can hear the Pi, so the Pi cannot hear the")
         print("  module: a Pi's radio carries much further than this one's.")
         print("  Move the module nearer the Pi, or put it on the house WiFi")
@@ -525,6 +513,62 @@ def join_setup_hotspot(timeout=HOTSPOT_JOIN_SECONDS):
         wlan.active(False)
     except OSError:
         pass
+    return None
+
+
+def join_wifi(config, timeout=20, attempts=3):
+    """Joins the saved network. None when it cannot."""
+    ssid = config.get("wifi_ssid", "")
+    if not ssid:
+        return None
+
+    for attempt in range(1, attempts + 1):
+        wlan = network.WLAN(network.STA_IF)
+        try:
+            if wlan.isconnected():
+                wlan.disconnect()
+                time.sleep(0.3)
+        except OSError:
+            pass
+        wlan.active(False)
+        time.sleep(0.5)
+
+        try:
+            network.hostname(config["name"])
+        except AttributeError:
+            try:
+                wlan.config(dhcp_hostname=config["name"])
+            except Exception:
+                pass
+
+        wlan.active(True)
+        
+        # --- POWER SAVING FIX ---
+        try:
+            wlan.config(pm=wlan.PM_NONE)
+        except Exception:
+            pass
+        time.sleep(1)
+
+        print("Joining '%s' (%d/%d)" % (ssid, attempt, attempts), end="")
+        try:
+            wlan.connect(ssid, config.get("wifi_pass", ""))
+        except OSError as exc:
+            print(" radio error: %s" % exc)
+            time.sleep(2)
+            continue
+
+        waited = 0
+        while not wlan.isconnected() and waited < timeout:
+            time.sleep(0.5)
+            waited += 0.5
+            print(".", end="")
+
+        if wlan.isconnected():
+            print(" ok — %s" % wlan.ifconfig()[0])
+            return wlan
+        print(" failed (status %s)" % wlan.status())
+
     return None
 
 
@@ -552,57 +596,6 @@ def announce_to_pi(wlan, config, switches):
     return post_json("http://%s:8000/api/esp32/announce" % gateway, payload)
 
 
-def join_wifi(config, timeout=20, attempts=3):
-    """Joins the saved network. None when it cannot."""
-    ssid = config.get("wifi_ssid", "")
-    if not ssid:
-        return None
-
-    for attempt in range(1, attempts + 1):
-        wlan = network.WLAN(network.STA_IF)
-        try:
-            if wlan.isconnected():
-                wlan.disconnect()
-                time.sleep(0.3)
-        except OSError:
-            pass
-        wlan.active(False)
-        time.sleep(0.5)
-
-        # The hostname has to be set while the interface is down. It is a
-        # courtesy — a readable entry in the router's table — not something
-        # the Pi relies on, because plenty of routers ignore it.
-        try:
-            network.hostname(config["name"])
-        except AttributeError:
-            try:
-                wlan.config(dhcp_hostname=config["name"])
-            except Exception:
-                pass
-
-        wlan.active(True)
-        time.sleep(0.5)
-
-        print("Joining '%s' (%d/%d)" % (ssid, attempt, attempts), end="")
-        try:
-            wlan.connect(ssid, config.get("wifi_pass", ""))
-        except OSError as exc:
-            print(" radio error: %s" % exc)
-            time.sleep(2)
-            continue
-
-        waited = 0
-        while not wlan.isconnected() and waited < timeout:
-            time.sleep(0.5)
-            waited += 0.5
-            print(".", end="")
-
-        if wlan.isconnected():
-            print(" ok — %s" % wlan.ifconfig()[0])
-            return wlan
-        print(" failed (status %s)" % wlan.status())
-
-    return None
 
 
 def post_json(url, payload, timeout=4):
@@ -1054,8 +1047,8 @@ def main():
             print("=" * 52)
             print("  UNCLAIMED — on the Pi's setup network")
             print("  ADDRESS : %s" % server.ip)
-            print("  It should now be listed in the portal under")
-            print("  Switch boards. Click it and enter the setup key.")
+            print("  It should now be listed in the portal under Smart")
+            print("  switch modules > Find new module. Connect it there.")
             print("=" * 52)
             print("")
         else:
@@ -1071,7 +1064,9 @@ def main():
         print("  UNCLAIMED - no network yet")
         print("  Looking for '%s' every %d seconds."
               % (SETUP_HOTSPOT_SSID, HEARTBEAT_SECONDS))
-        print("  Open a setup window from the Pi's portal to raise it.")
+        print("  It should already be up - nothing to open on the Pi any")
+        print("  more. If it never appears, see esp32/CONFIG.md for the")
+        print("  USB setup route.")
         print("=" * 52)
         print("")
 
@@ -1094,8 +1089,8 @@ def main():
         # second (the socket timeout below), a slow readable blink.
         #
         #   off      no network
-        #   blink    on the setup network, waiting to be adopted
-        #   solid    on Buddy-Switches, set up
+        #   blink    on Buddy-Modules, waiting to be adopted (setup indicator)
+        #   solid    on the house network handed over by the Pi, set up
         if led:
             if wlan is None:
                 led.value(0)
