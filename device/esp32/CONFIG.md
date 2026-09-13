@@ -65,13 +65,14 @@ and a key of its own. It does not hand it a name.
 `POST /update` on the module fetches new firmware and restarts onto it:
 
 ```json
-{"url": "https://raw.githubusercontent.com/ETORMANATOR/buddy_smart_switch_module/main/main.py",
+{"url": "https://raw.githubusercontent.com/ETORMANATOR/buddy_smart_switch_module/main/device/esp32/main.py",
  "sha256": "<hex digest of that file>"}
 ```
 
-That is this repository — <https://github.com/ETORMANATOR/buddy_smart_switch_module>
-— and it is the module's own default, so `POST /update` with an empty body
-fetches from there.
+That is this repository, which keeps a folder per kind of hardware —
+`device/esp32/`, `device/esp8266/` — and the module builds that path from its
+own `device_type`. So `POST /update` with an empty body fetches the build for
+what it actually is, and an ESP8266 can never be handed an ESP32 one.
 
 The normal route is the portal's **update firmware** button, which does this
 for you: the Pi fetches from GitHub, checks the file is firmware rather than a
@@ -80,12 +81,12 @@ of what the Pi actually got. The module refuses anything whose hash differs,
 refuses anything that does not look like firmware, and keeps the old copy as
 `main.bak`.
 
-The Pi uses the same URL by default. Point it at a fork or a branch with
-`BUDDY_FIRMWARE_URL`:
+The Pi builds the same path. Point it at a fork or a branch with
+`BUDDY_FIRMWARE_BASE`, which is the `device/` folder rather than one file:
 
 ```
 sudo systemctl edit buddy-backend
-# Environment=BUDDY_FIRMWARE_URL=https://raw.githubusercontent.com/<owner>/<repo>/<branch>/main.py
+# Environment=BUDDY_FIRMWARE_BASE=https://raw.githubusercontent.com/<owner>/<repo>/<branch>/device
 ```
 
 It must be a **raw** URL. The `github.com/...` address serves a web page about

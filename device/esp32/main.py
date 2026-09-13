@@ -141,7 +141,12 @@ FIRMWARE_VERSION = "1.1.0"
 #
 # Written as a raw file URL, because that is what serves the file itself
 # rather than a page about it.
-FIRMWARE_URL = ("https://raw.githubusercontent.com/ETORMANATOR/buddy_smart_switch_module/main/main.py")
+# The repository, laid out a folder per kind of hardware. The type is part
+# of the path rather than a label on the file: an ESP8266 handed an ESP32
+# build is a module on a wall that does not come back.
+FIRMWARE_BASE_URL = ("https://raw.githubusercontent.com/ETORMANATOR/"
+                     "buddy_smart_switch_module/main/device")
+FIRMWARE_URL = "%s/%s/main.py" % (FIRMWARE_BASE_URL, DEVICE_TYPE)
 
 # Kept beside the running firmware after an update, so a module that comes
 # back broken can be put back the way it was over USB with one copy.
