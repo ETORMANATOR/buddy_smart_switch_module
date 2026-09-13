@@ -81,8 +81,9 @@
 # `WPA-PSK WPA-PSK-SHA256`, which is the likeliest culprit.
 #
 # --------------------------------------------------------- FACTORY RESET --
-# Hold the button on GPIO 0 for three seconds. Everything goes: name, switch
-# names, WiFi, keys. The board comes back up unclaimed.
+# Hold the button on GPIO 0 for three seconds. The WiFi and the key it was
+# given go, so the board comes back up unclaimed. Its name, its id and its
+# switch states are not what a reset means to undo, and stay.
 
 import json
 import os
@@ -133,7 +134,7 @@ DEVICE_TYPE = "esp32"
 # The Pi reads this same line out of the copy it fetched from GitHub, which is
 # how "update available" is decided - so the string has to stay easy to find:
 # one line, plain quotes, nothing computed.
-FIRMWARE_VERSION = "1.8.6"
+FIRMWARE_VERSION = "1.8.7"
 
 # Where `POST /update` fetches new firmware from when it is not told
 # otherwise. Set it per module in config.json ("firmware_url"), or pass a url
@@ -296,16 +297,25 @@ def is_provisioned(config):
 # them would mean a cable and a laptop before the module could be set up
 # again. How many relays it has is a fact about the wiring, not about who
 # owns it, so that stays too.
-KEPT_THROUGH_RESET = ("device_type", "smart_switch_id", "name", "switch_count")
+#
+# The switch states are not identity or wiring - they are the one fact
+# about the physical world this module is in charge of. Resetting who owns
+# a module is not a reason to also plunge whatever it is switching into
+# darkness: a light that was on has no idea an adoption just changed hands,
+# and should not have to.
+KEPT_THROUGH_RESET = ("device_type", "smart_switch_id", "name", "switch_count",
+                      "states")
 
 
 def factory_reset():
-    """Forgets whose module this is. Not what it is.
+    """Forgets whose module this is. Not what it is, and not what it was doing.
 
-    The network, the key it was given, and what its switches were doing all
-    go. Its identity stays, because that is not something being reset means
-    to undo - and a module that came back nameless could not even be adopted
-    again without a USB cable.
+    The network and the key it was given go. Its identity stays, because
+    that is not something being reset means to undo - a module that came
+    back nameless could not even be adopted again without a USB cable. Its
+    switches stay exactly as they were too: on relay 3, off on relay 5,
+    whatever it actually was, since a relay's job is describing the room it
+    is wired into, not who currently owns the module doing the describing.
     """
     print("FACTORY RESET - forgetting the network and the key")
     kept = {}
