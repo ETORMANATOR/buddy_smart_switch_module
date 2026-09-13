@@ -1,0 +1,11 @@
+{
+  "serial": "SW-000412",
+  "name": "living_room",
+  "location": "Living room, behind the TV",
+  "switches": ["tv_socket", "floor_lamp", "fan", "spare"],
+  "wifi_ssid": "Buddy-Modules",
+  "wifi_pass": "",
+  "pi_url": "http://192.168.1.242:8000",
+  "device_key": "",
+  "provisioned": false
+}
