@@ -133,7 +133,7 @@ DEVICE_TYPE = "esp32"
 # The Pi reads this same line out of the copy it fetched from GitHub, which is
 # how "update available" is decided - so the string has to stay easy to find:
 # one line, plain quotes, nothing computed.
-FIRMWARE_VERSION = "1.3.0"
+FIRMWARE_VERSION = "1.5.0"
 
 # Where `POST /update` fetches new firmware from when it is not told
 # otherwise. Set it per module in config.json ("firmware_url"), or pass a url
@@ -815,6 +815,25 @@ def looks_like_firmware(path):
 
 # ------------------------------------------------------------- responses --
 
+_status_led = None
+
+
+def wink_twice():
+    """Two quick blinks for a request, then back to the resting state.
+
+    Called on the way into handling any request, so the light shows the
+    module being talked to. It restores solid rather than guessing: a request
+    only reaches here when the module is up, and up-and-adopted is solid.
+    """
+    if _status_led is None:
+        return
+    for _ in range(2):
+        _status_led.value(0)
+        time.sleep(0.08)
+        _status_led.value(1)
+        time.sleep(0.08)
+
+
 def json_response(payload):
     return 200, json.dumps(payload)
 
@@ -1078,7 +1097,9 @@ def main():
     switches = Switches(switch_names(config["switch_count"]),
                         config.get("states"), remember)
 
+    global _status_led
     led = Pin(STATUS_LED_PIN, Pin.OUT, value=0) if STATUS_LED_PIN is not None else None
+    _status_led = led
     try:
         button = Pin(RESET_PIN, Pin.IN, Pin.PULL_UP)
     except ValueError:
@@ -1121,8 +1142,6 @@ def main():
 
     if wlan is not None:
         server.ip = wlan.ifconfig()[0]
-        if led:
-            led.value(1)
         if waiting_on_hotspot:
             print("")
             print("=" * 52)
@@ -1150,9 +1169,26 @@ def main():
 
     held_since = None
     last_beat = 0
+    blink = False               # toggles each pass, for the setup blink
 
     while True:
         held_since = watch_reset_button(button, held_since)
+
+        # The resting state of the light, set every pass so the blink keeps
+        # going while nothing else happens. The loop turns over about once a
+        # second (the socket timeout below), a slow readable blink.
+        #
+        #   off      no network
+        #   blink    on the setup network, waiting to be adopted
+        #   solid    on Buddy-Switches, set up
+        if led:
+            if wlan is None:
+                led.value(0)
+            elif waiting_on_hotspot:
+                blink = not blink
+                led.value(1 if blink else 0)
+            else:
+                led.value(1)
 
         if time.time() - last_beat >= HEARTBEAT_SECONDS:
             last_beat = time.time()
@@ -1166,8 +1202,6 @@ def main():
                                             or "the network"))
                 wlan = None
                 waiting_on_hotspot = False
-                if led:
-                    led.value(0)
 
             if wlan is None:
                 # Our own network first - it is the one we belong on, and the
@@ -1183,8 +1217,6 @@ def main():
 
                 if wlan is not None:
                     server.ip = wlan.ifconfig()[0]
-                    if led:
-                        led.value(1)
                     print("back on the air - %s" % server.ip)
                     if waiting_on_hotspot:
                         announce_to_pi(wlan, config, switches)
@@ -1195,12 +1227,14 @@ def main():
             elif waiting_on_hotspot:
                 # On the Pi's setup network, which it can only be reached on
                 # by way of the gateway. Keep saying hello, or the portal
-                # forgets us while somebody is still deciding.
+                # forgets us while somebody is still deciding. Not adopted
+                # yet, so the light stays blinking.
                 announce_to_pi(wlan, config, switches)
 
             elif config.get("pi_url") and has_identity(config):
                 # Where we belong: report in, so the Pi can keep calling us
-                # by name however the address moves.
+                # by name however the address moves. Whether the report
+                # landed is what the solid light means.
                 payload = state_payload(config, switches, server.ip)
                 payload["key"] = config.get("device_key", "")
                 post_json(config["pi_url"].rstrip("/") + "/api/esp32/register",
@@ -1215,6 +1249,7 @@ def main():
             method, path, body = read_request(conn)
             if path is None:
                 continue
+            wink_twice()                 # show we were called, then back to solid
             code, reply = server.handle(method, path, body)
             conn.send("HTTP/1.1 %d OK\r\nContent-Type: application/json\r\n"
                       "Connection: close\r\n\r\n%s" % (code, reply))
