@@ -133,7 +133,7 @@ DEVICE_TYPE = "esp32"
 # The Pi reads this same line out of the copy it fetched from GitHub, which is
 # how "update available" is decided - so the string has to stay easy to find:
 # one line, plain quotes, nothing computed.
-FIRMWARE_VERSION = "1.1.0"
+FIRMWARE_VERSION = "1.2.0"
 
 # Where `POST /update` fetches new firmware from when it is not told
 # otherwise. Set it per module in config.json ("firmware_url"), or pass a url
@@ -1123,32 +1123,54 @@ def main():
         if time.time() - last_beat >= HEARTBEAT_SECONDS:
             last_beat = time.time()
 
-            if wlan is not None and config.get("pi_url") and has_identity(config):
-                # Claimed and on the house network: report where we are, so
-                # the Pi can keep calling us by name however the address moves.
+            # Still actually on a network? The connection object survives
+            # its access point disappearing, so this is the only way to
+            # tell - and without it a module whose network went down keeps
+            # posting into nothing for good.
+            if wlan is not None and not wlan.isconnected():
+                print("dropped off '%s'" % (config.get("wifi_ssid")
+                                            or "the network"))
+                wlan = None
+                waiting_on_hotspot = False
+                if led:
+                    led.value(0)
+
+            if wlan is None:
+                # Our own network first - it is the one we belong on, and the
+                # Pi's setup network may not even exist most of the time. It
+                # comes and goes with whoever is adopting modules.
+                if is_provisioned(config):
+                    wlan = join_wifi(config, attempts=1)
+                if wlan is not None:
+                    waiting_on_hotspot = False
+                else:
+                    wlan = join_setup_hotspot(timeout=6)
+                    waiting_on_hotspot = wlan is not None
+
+                if wlan is not None:
+                    server.ip = wlan.ifconfig()[0]
+                    if led:
+                        led.value(1)
+                    print("back on the air - %s" % server.ip)
+                    if waiting_on_hotspot:
+                        announce_to_pi(wlan, config, switches)
+
+            if wlan is None:
+                pass                    # still nothing; the AP is up, wait
+
+            elif waiting_on_hotspot:
+                # On the Pi's setup network, which it can only be reached on
+                # by way of the gateway. Keep saying hello, or the portal
+                # forgets us while somebody is still deciding.
+                announce_to_pi(wlan, config, switches)
+
+            elif config.get("pi_url") and has_identity(config):
+                # Where we belong: report in, so the Pi can keep calling us
+                # by name however the address moves.
                 payload = state_payload(config, switches, server.ip)
                 payload["key"] = config.get("device_key", "")
                 post_json(config["pi_url"].rstrip("/") + "/api/esp32/register",
                           payload)
-
-            elif waiting_on_hotspot and wlan is not None:
-                # Unclaimed, on the Pi's network: keep saying so, or the
-                # portal forgets us while somebody is still deciding.
-                announce_to_pi(wlan, config, switches)
-
-            elif wlan is None:
-                # On our own access point, claimed or not. The Pi's network
-                # may have come up since we last looked - it is usually
-                # switched on at the moment somebody goes looking for
-                # modules, and a module that stopped retrying would be one
-                # that needs a person with a cable.
-                found = join_setup_hotspot(timeout=6)
-                if found is not None:
-                    wlan = found
-                    waiting_on_hotspot = True
-                    server.ip = wlan.ifconfig()[0]
-                    announce_to_pi(wlan, config, switches)
-                    print("joined the Pi's setup network — %s" % server.ip)
 
         try:
             conn, _ = sock.accept()

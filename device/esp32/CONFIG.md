@@ -29,7 +29,7 @@ you are actually setting. This is a complete, working config:
 | `smart_switch_id` | the id on your sticker and in your asset register. Yours to choose; the Pi shows it and matches on it. |
 | `name` | the module's own name — what it answers to. No spaces; use `_`. |
 | `switch_count` | how many relays, 1 to 6, in GPIO order (1, 3, 4, 5, 6, 7). They are called `switch1`..`switchN`; what a person calls them is a label on the Pi. |
-| `wifi_ssid` / `wifi_pass` | the network to join. `Buddy-Modules` is the Pi's own, which is where modules normally live. |
+| `wifi_ssid` / `wifi_pass` | the network to join. Adoption fills these in with the Pi's module network — see below. |
 | `pi_url` | where to report in, e.g. `http://192.168.1.242:8000`. |
 | `device_key` | the module's own key. Written by the Pi when it adopts the module. |
 | `firmware_url` | where `POST /update` fetches from when it is not told otherwise. |
@@ -46,6 +46,28 @@ to the Pi. A module with neither says so at boot and waits: it has no identity
 to report, and nothing on it will make one up. Two unconfigured modules
 reporting as the same nameless thing would overwrite each other, which is the
 failure this refuses to have.
+
+## Two networks, taking turns
+
+The Pi has one radio, and one radio holds up one access point — so its two
+networks take turns rather than running together:
+
+* **`Buddy-Switches`** is where adopted modules live. Its password is made on
+  the Pi, kept there, and handed to a module when it is adopted. This is up
+  almost always.
+* **`Buddy-Modules`** is the setup network, and its password is the setup key
+  compiled into the firmware. It exists only while somebody opens a setup
+  window from the portal — ten minutes, and it closes itself.
+
+That is what makes the setup key worth having: it opens a network that is
+almost never there, and it is not the key to the network the modules live on.
+An unclaimed module knows only that key, so the most it can reach is a window
+somebody deliberately opened.
+
+The cost of one radio, said plainly: while a window is open, adopted modules
+cannot reach the Pi. They keep their switch states and keep looking, and they
+come back on their own when it closes — but a voice command during those
+minutes will not land.
 
 ## Names: the module's, and the Pi's
 
