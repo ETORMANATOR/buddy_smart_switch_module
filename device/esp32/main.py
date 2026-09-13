@@ -133,7 +133,7 @@ DEVICE_TYPE = "esp32"
 # The Pi reads this same line out of the copy it fetched from GitHub, which is
 # how "update available" is decided - so the string has to stay easy to find:
 # one line, plain quotes, nothing computed.
-FIRMWARE_VERSION = "1.5.0"
+FIRMWARE_VERSION = "1.6.0"
 
 # Where `POST /update` fetches new firmware from when it is not told
 # otherwise. Set it per module in config.json ("firmware_url"), or pass a url
@@ -418,8 +418,15 @@ def start_ap(config):
     # Named after the module when it has a name, and plainly when it does
     # not. Two un-named modules powered up in one room will raise the same
     # access point, which is a good reason to set them up one at a time.
+    #
+    # Capped at 32 bytes - the 802.11 SSID limit - because the radio enforces
+    # it silently otherwise: ask for a longer one and it comes up truncated,
+    # with no error, and the check just below (which compares what came up
+    # against what was asked for) would then report a false "did not start"
+    # for an access point that is actually fine, just shorter than intended.
+    prefix = "Buddy-Setup-"
     if config.get("name"):
-        ssid = "Buddy-Setup-%s" % config["name"]
+        ssid = (prefix + config["name"])[:32]
     else:
         ssid = "Buddy-Setup"
 
