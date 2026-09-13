@@ -30,7 +30,7 @@ you are actually setting. This is a complete, working config:
 | `name` | the module's own name — what it answers to. No spaces; use `_`. |
 | `switch_count` | how many relays, 1 to 6, in GPIO order (1, 3, 4, 5, 6, 7). They are called `switch1`..`switchN`; what a person calls them is a label on the Pi. |
 | `wifi_ssid` / `wifi_pass` | the network to join. Adoption fills these in with the Pi's module network — see below. |
-| `pi_url` | where to report in, e.g. `http://192.168.1.242:8000`. |
+| `pi_url` | where to report in, e.g. `http://192.168.1.60:8000`. |
 | `device_key` | the module's own key. Written by the Pi when it adopts the module. |
 | `firmware_url` | where `POST /update` fetches from when it is not told otherwise. |
 | `states` | written by the firmware, not by you — what each switch was last set to, so a power cut does not turn the house off. |

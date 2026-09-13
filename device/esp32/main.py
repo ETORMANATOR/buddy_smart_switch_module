@@ -221,7 +221,7 @@ def default_config():
         "switch_count": 6,
         "wifi_ssid": "",
         "wifi_pass": "",
-        "pi_url": "",
+        "pi_url": "http://192.168.1.60:8000",
         "device_key": "",
         "firmware_url": "",
         # What each switch was last set to. Kept so a module comes back after

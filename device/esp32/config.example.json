@@ -5,7 +5,7 @@
   "switch_count": 4,
   "wifi_ssid": "Buddy-Modules",
   "wifi_pass": "",
-  "pi_url": "http://192.168.1.242:8000",
+  "pi_url": "http://192.168.1.60:8000",
   "device_key": "",
   "firmware_url": ""
 }
