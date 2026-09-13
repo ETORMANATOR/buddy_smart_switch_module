@@ -120,6 +120,12 @@ HOTSPOT_JOIN_SECONDS = 12
 
 CONFIG_FILE = "config.json"
 
+# What this device is. Reported on every check-in so the Pi can tell one kind
+# of module from another without guessing from the shape of the reply - a
+# fleet gets more than one kind of hardware in it eventually, and the day it
+# does is not the day to start asking.
+DEVICE_TYPE = "esp32"
+
 # Where `POST /update` fetches new firmware from when it is not told
 # otherwise. Set it per module in config.json ("firmware_url"), or pass a url
 # with the request - the Pi does, which is how one button updates a fleet.
@@ -167,6 +173,15 @@ RESET_HOLD_SECONDS = 3
 # over USB, or by being adopted from the portal. See esp32/CONFIG.md.
 
 
+def device_type(config=None):
+    """What kind of device this is. Overridable, but rarely worth it."""
+    if config:
+        chosen = str(config.get("device_type", "")).strip()
+        if chosen:
+            return chosen
+    return DEVICE_TYPE
+
+
 def smart_switch_id(config):
     """What this module is called in the asset register. Whatever you set."""
     return str(config.get("smart_switch_id", "")).strip()
@@ -184,16 +199,17 @@ def default_config():
         # Both empty, always. An id or a name written into this file is the
         # same id on every module flashed with it, which is the one thing an
         # id must never be. They are set per module, in config.json.
+        "device_type": DEVICE_TYPE,
         "smart_switch_id": "",
         "name": "",
-        "location": "",
-        "switches": ["switch_%d" % (i + 1) for i in range(4)],
+        # How many relays, not what they are called. The names follow the
+        # count - switch1..switchN - and the Pi labels them for people.
+        "switch_count": 6,
         "wifi_ssid": "",
         "wifi_pass": "",
         "pi_url": "",
         "device_key": "",
         "firmware_url": "",
-        "provisioned": False,
         # What each switch was last set to. Kept so a module comes back after
         # a power cut the way the house was left, rather than with every
         # light off and somebody wondering why.
@@ -215,7 +231,12 @@ def load_config():
     for key in config:
         if key in saved:
             config[key] = saved[key]
-    config["switches"] = normalise_switches(config.get("switches"))
+    # A list is accepted and counted: a config written when switches had
+    # names should not leave a module with none.
+    wanted = config.get("switch_count")
+    if isinstance(wanted, list):
+        wanted = len(wanted)
+    config["switch_count"] = len(switch_names(wanted))
     config["name"] = str(config.get("name", "")).strip()
     return config
 
@@ -231,19 +252,29 @@ def save_config(config):
     os.rename(tmp, CONFIG_FILE)
 
 
-def normalise_switches(names):
-    """A clean, unique, in-range list of switch names."""
-    if not isinstance(names, list):
-        names = []
-    out = []
-    for index, raw in enumerate(names[:MAX_SWITCHES]):
-        name = str(raw or "").strip() or "switch_%d" % (index + 1)
-        # Local uniqueness only; the Pi is the one that can see every board
-        # and so is the only thing that can enforce it across the fleet.
-        while name in out:
-            name = "%s_%d" % (name, index + 1)
-        out.append(name)
-    return out
+def switch_names(count):
+    """switch1 .. switchN, in relay order.
+
+    Generated rather than stored, so they cannot drift from the relays they
+    name and cannot be duplicated. What a person calls a switch is a label,
+    and labels live on the Pi.
+    """
+    try:
+        count = int(count)
+    except (TypeError, ValueError):
+        count = 1
+    count = max(1, min(MAX_SWITCHES, count))
+    return ["switch%d" % (index + 1) for index in range(count)]
+
+
+def is_provisioned(config):
+    """Whether this module has a network of its own to join.
+
+    Derived, not stored. As a stored flag it could say no while wifi_ssid
+    said yes, and then a module sits raising its own access point next to
+    the network it was given.
+    """
+    return bool(str(config.get("wifi_ssid", "")).strip())
 
 
 def factory_reset():
@@ -325,19 +356,6 @@ class Switches:
             self.set(name, on, save=False)
         if changed and self._remember:
             self._remember(self.state)
-
-    def rename(self, old, new):
-        """Keeps the relay and its state, changes only what it is called."""
-        if old not in self.pins:
-            return False
-        names = [new if n == old else n for n in self.names]
-        was_on = self.state.get(old, False)
-        self.apply(normalise_switches(names))
-        cleaned = str(new or "").strip() or old
-        if cleaned in self.pins:
-            self.set(cleaned, was_on)
-        return True
-
 
 # ------------------------------------------------------------ networking --
 
@@ -568,6 +586,7 @@ def announce_to_pi(wlan, config, switches):
         return False
 
     payload = {
+        "device_type": device_type(config),
         "smart_switch_id": smart_switch_id(config),
         "ip": wlan.ifconfig()[0],
         "name": config["name"],
@@ -754,7 +773,7 @@ def json_response(payload):
 def state_payload(config, switches, ip):
     return {
         "name": config["name"],
-        "location": config.get("location", ""),
+        "device_type": device_type(config),
         "ip": ip,
         "smart_switch_id": smart_switch_id(config),
         "max_switches": MAX_SWITCHES,
@@ -799,9 +818,10 @@ class Server:
         """
         return json_response({
             "device": "buddy-switch",
+            "device_type": device_type(self.config),
             "name": self.config["name"],
             "smart_switch_id": smart_switch_id(self.config),
-            "provisioned": bool(self.config.get("provisioned")),
+            "provisioned": is_provisioned(self.config),
             "switch_count": len(self.switches.names),
             "max_switches": MAX_SWITCHES,
         })
@@ -814,20 +834,12 @@ class Server:
         if not ssid:
             return 400, json.dumps({"error": "no wifi ssid given"})
 
+        # A network, somewhere to report to, and a key. Nothing about what
+        # this module is: its id, its name and how many relays it has are
+        # set on the module itself and are not adoption's to rewrite.
         self.config["wifi_ssid"] = ssid
         self.config["wifi_pass"] = str(body.get("pass", ""))
         self.config["pi_url"] = str(body.get("pi_url", "")).strip()
-        if body.get("name"):
-            self.config["name"] = str(body["name"]).strip()
-        if body.get("smart_switch_id"):
-            self.config["smart_switch_id"] = str(body["smart_switch_id"]).strip()
-        if body.get("location"):
-            self.config["location"] = str(body["location"])[:60]
-        if body.get("switches"):
-            self.config["switches"] = normalise_switches(body["switches"])
-        elif body.get("switch_count"):
-            count = max(1, min(MAX_SWITCHES, int(body["switch_count"])))
-            self.config["switches"] = ["switch_%d" % (i + 1) for i in range(count)]
 
         # A key of its own, now that there is something worth protecting: the
         # setup key opened the door once, and from here the Pi uses this
@@ -841,7 +853,6 @@ class Server:
                 "error": "no device key supplied; the Pi must send one",
             })
         self.config["device_key"] = key
-        self.config["provisioned"] = True
         self.save()
 
         self.reboot_after_reply = True
@@ -849,37 +860,8 @@ class Server:
             "ok": True,
             "name": self.config["name"],
             "device_key": self.config["device_key"],
-            "switches": self.config["switches"],
+            "switches": list(self.switches.names),
         })
-
-    def rename(self, body):
-        """Renames the module, a switch, or both — and remembers it."""
-        changed = []
-
-        if "smart_switch_id" in body:
-            self.config["smart_switch_id"] = str(body["smart_switch_id"]).strip()
-            changed.append("smart_switch_id")
-
-        if body.get("name"):
-            self.config["name"] = str(body["name"]).strip()
-            changed.append("device")
-
-        renames = body.get("switches") or {}
-        if isinstance(renames, dict):
-            for old, new in renames.items():
-                if self.switches.rename(old, str(new or "").strip() or old):
-                    changed.append(old)
-            self.config["switches"] = list(self.switches.names)
-            self.config["states"] = dict(self.switches.state)
-
-        if not changed:
-            return 400, json.dumps({"error": "nothing to rename"})
-
-        self.save()
-        return json_response({"ok": True, "renamed": changed,
-                              "name": self.config["name"],
-                              "smart_switch_id": smart_switch_id(self.config),
-                              "switches": self.config["switches"]})
 
     def update(self, body):
         """Fetches new firmware and restarts onto it.
@@ -936,24 +918,18 @@ class Server:
                               "from": url})
 
     def configure_switches(self, body):
-        """Sets how many switches this board has, or what they are called."""
-        if body.get("switches"):
-            names = normalise_switches(body["switches"])
-        elif body.get("count") is not None:
-            count = int(body["count"])
-            if count < 1 or count > MAX_SWITCHES:
-                return 400, json.dumps({
-                    "error": "this board has %d usable relay pins" % MAX_SWITCHES,
-                })
-            names = normalise_switches(
-                [self.switches.names[i] if i < len(self.switches.names)
-                 else "switch_%d" % (i + 1) for i in range(count)]
-            )
-        else:
-            return 400, json.dumps({"error": "give switches or count"})
+        """Sets how many relays this module drives."""
+        if body.get("count") is None:
+            return 400, json.dumps({"error": "give a count"})
 
-        self.switches.apply(names, self.config.get("states"))
-        self.config["switches"] = list(self.switches.names)
+        count = int(body["count"])
+        if count < 1 or count > MAX_SWITCHES:
+            return 400, json.dumps({
+                "error": "this module has %d usable relay pins" % MAX_SWITCHES,
+            })
+
+        self.config["switch_count"] = count
+        self.switches.apply(switch_names(count), self.config.get("states"))
         self.config["states"] = dict(self.switches.state)
         self.save()
         return json_response(state_payload(self.config, self.switches, self.ip))
@@ -976,9 +952,6 @@ class Server:
 
         if path in ("/status", "/info"):
             return json_response(state_payload(self.config, self.switches, self.ip))
-
-        if path == "/rename":
-            return self.rename(body)
 
         if path == "/switches":
             return self.configure_switches(body)
@@ -1051,7 +1024,8 @@ def main():
             # A full or failing flash must not stop the relays working.
             print("could not save switch states: %s" % exc)
 
-    switches = Switches(config["switches"], config.get("states"), remember)
+    switches = Switches(switch_names(config["switch_count"]),
+                        config.get("states"), remember)
 
     led = Pin(STATUS_LED_PIN, Pin.OUT, value=0) if STATUS_LED_PIN is not None else None
     try:
@@ -1078,10 +1052,10 @@ def main():
         print("=" * 52)
         print("")
 
-    wlan = join_wifi(config) if config.get("provisioned") else None
+    wlan = join_wifi(config) if is_provisioned(config) else None
     waiting_on_hotspot = False
 
-    if wlan is None and not config.get("provisioned"):
+    if wlan is None and not is_provisioned(config):
         # Unclaimed. Go looking for the Pi rather than waiting to be found.
         wlan = join_setup_hotspot()
         if wlan is not None:
@@ -1139,7 +1113,7 @@ def main():
                 # portal forgets us while somebody is still deciding.
                 announce_to_pi(wlan, config, switches)
 
-            elif not config.get("provisioned"):
+            elif not is_provisioned(config):
                 # Unclaimed and on our own access point. The Pi's hotspot may
                 # have come up since we last looked — it is usually switched
                 # on at the moment somebody presses "Find new boards".
@@ -1181,7 +1155,8 @@ def banner(config, switches, ip):
     print("")
     print("=" * 52)
     print("  NAME     : %s" % config["name"])
-    print("  LOCATION : %s" % (config.get("location") or "-"))
+    print("  TYPE     : %s" % device_type(config))
+    print("  ID       : %s" % (smart_switch_id(config) or "-"))
     print("  IP       : %s   (the Pi calls it by name, not this)" % ip)
     print("  PI       : %s" % (config.get("pi_url") or "not set"))
     print("-" * 52)

@@ -25,16 +25,21 @@ you are actually setting. This is a complete, working config:
 
 | key | what it is |
 |---|---|
+| `device_type` | what kind of hardware this is — `esp32`. Reported on every check-in so a fleet with more than one kind of device in it never has to guess. |
 | `smart_switch_id` | the id on your sticker and in your asset register. Yours to choose; the Pi shows it and matches on it. |
 | `name` | the module's own name — what it answers to. No spaces; use `_`. |
-| `location` | free text, shown in the portal. |
-| `switches` | the switch names, in GPIO order (1, 3, 4, 5, 6, 7). One to six. |
+| `switch_count` | how many relays, 1 to 6, in GPIO order (1, 3, 4, 5, 6, 7). They are called `switch1`..`switchN`; what a person calls them is a label on the Pi. |
 | `wifi_ssid` / `wifi_pass` | the network to join. `Buddy-Modules` is the Pi's own, which is where modules normally live. |
 | `pi_url` | where to report in, e.g. `http://192.168.1.242:8000`. |
 | `device_key` | the module's own key. Written by the Pi when it adopts the module. |
 | `firmware_url` | where `POST /update` fetches from when it is not told otherwise. |
-| `provisioned` | `false` puts it in setup mode, waiting to be adopted from the portal. |
 | `states` | written by the firmware, not by you — what each switch was last set to, so a power cut does not turn the house off. |
+
+There is no `provisioned` flag and no `location`. A module is provisioned when
+it has a `wifi_ssid` to join — a stored flag could say no while the network
+said yes, and then a module sits raising its own access point next to the
+network it was given. Where a module is, is a note the Pi keeps: the module
+has never had a use for it.
 
 **Both `smart_switch_id` and `name` are required** before a module will report
 to the Pi. A module with neither says so at boot and waits: it has no identity
@@ -44,8 +49,10 @@ failure this refuses to have.
 
 ## Names: the module's, and the Pi's
 
-The module's name and its switch names are set here and **nothing else changes
-them**. Renaming in the portal sets a *label* on the Pi — what you call it,
+The module's name is set here and **nothing else changes it**; its switches
+are called `switch1`..`switchN` and nothing changes those either. The module
+has no rename endpoint at all - there is one place identity comes from, and
+it is this file. Renaming in the portal sets a *label* on the Pi — what you call it,
 what you say to it, what the portal shows — and the module never hears about
 it. Both names work when addressing a module, so automation written against
 the module's own name keeps working after somebody relabels it.

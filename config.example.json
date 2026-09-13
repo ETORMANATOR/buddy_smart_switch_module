@@ -1,12 +1,11 @@
 {
-  "smart_switch_id": "SW-ec3e01d2-0ea9-407e-9136-ca1303372385",
+  "device_type": "esp32",
+  "smart_switch_id": "SW-000412",
   "name": "living_room",
-  "location": "Living room, behind the TV",
-  "switches": ["tv_socket", "floor_lamp", "fan", "spare"],
+  "switch_count": 4,
   "wifi_ssid": "Buddy-Modules",
   "wifi_pass": "",
   "pi_url": "http://192.168.1.242:8000",
   "device_key": "",
-  "firmware_url": "",
-  "provisioned": false
+  "firmware_url": ""
 }
