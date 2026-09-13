@@ -133,7 +133,7 @@ DEVICE_TYPE = "esp32"
 # The Pi reads this same line out of the copy it fetched from GitHub, which is
 # how "update available" is decided - so the string has to stay easy to find:
 # one line, plain quotes, nothing computed.
-FIRMWARE_VERSION = "1.2.0"
+FIRMWARE_VERSION = "1.3.0"
 
 # Where `POST /update` fetches new firmware from when it is not told
 # otherwise. Set it per module in config.json ("firmware_url"), or pass a url
@@ -291,12 +291,46 @@ def is_provisioned(config):
     return bool(str(config.get("wifi_ssid", "")).strip())
 
 
+# What a factory reset keeps. The asset number and the name are the module's
+# identity, set by hand and painted on the case; a reset button that wiped
+# them would mean a cable and a laptop before the module could be set up
+# again. How many relays it has is a fact about the wiring, not about who
+# owns it, so that stays too.
+KEPT_THROUGH_RESET = ("device_type", "smart_switch_id", "name", "switch_count")
+
+
 def factory_reset():
-    print("FACTORY RESET — clearing everything")
+    """Forgets whose module this is. Not what it is.
+
+    The network, the key it was given, and what its switches were doing all
+    go. Its identity stays, because that is not something being reset means
+    to undo - and a module that came back nameless could not even be adopted
+    again without a USB cable.
+    """
+    print("FACTORY RESET - forgetting the network and the key")
+    kept = {}
+    try:
+        config = load_config()
+        for key in KEPT_THROUGH_RESET:
+            if config.get(key):
+                kept[key] = config[key]
+    except Exception:
+        pass
+
     try:
         os.remove(CONFIG_FILE)
     except OSError:
         pass
+
+    if kept:
+        print("  keeping: %s" % ", ".join("%s=%s" % (k, kept[k])
+                                          for k in sorted(kept)))
+        try:
+            with open(CONFIG_FILE, "w") as handle:
+                json.dump(kept, handle)
+        except OSError as exc:
+            print("  could not keep it: %s" % exc)
+
     time.sleep(0.5)
     machine.reset()
 
