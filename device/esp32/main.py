@@ -133,7 +133,7 @@ DEVICE_TYPE = "esp32"
 # The Pi reads this same line out of the copy it fetched from GitHub, which is
 # how "update available" is decided - so the string has to stay easy to find:
 # one line, plain quotes, nothing computed.
-FIRMWARE_VERSION = "1.8.1"
+FIRMWARE_VERSION = "1.8.2"
 
 # Where `POST /update` fetches new firmware from when it is not told
 # otherwise. Set it per module in config.json ("firmware_url"), or pass a url
@@ -700,17 +700,49 @@ def looks_like_firmware(path):
     A truncated download or a login page saved over main.py is a module that
     does not come back, and one that is screwed to a wall is one somebody has
     to unscrew. Cheap to check, expensive to skip.
+
+    Read in pieces rather than as one string - measured on this chip mid
+    update: the heap is already holding the socket this download is a reply
+    to, and a single ~44KB allocation for the whole file failed on it
+    ("memory allocation failed, allocating 42752 bytes"). The exception was
+    never caught this deep, so it unwound past the point where any HTTP
+    response gets sent at all - the Pi saw a connection closed with nothing
+    on it, which is a worse failure than the 422 this was supposed to guard
+    against.
     """
     try:
-        if os.stat(path)[6] < 5000:
-            return False
+        size = os.stat(path)[6]
     except OSError:
         return False
-    with open(path) as handle:
-        text = handle.read()
-    return ("def main():" in text
-            and "SWITCH_PINS" in text
-            and text.rstrip().endswith("main()"))
+    if size < 5000:
+        return False
+
+    found_main_def = False
+    found_switch_pins = False
+    overlap = b""
+    with open(path, "rb") as handle:
+        while True:
+            chunk = handle.read(512)
+            if not chunk:
+                break
+            window = overlap + chunk
+            if b"def main():" in window:
+                found_main_def = True
+            if b"SWITCH_PINS" in window:
+                found_switch_pins = True
+            # Enough of this chunk's tail to catch either marker landing
+            # split across the boundary with the next one.
+            overlap = chunk[-16:]
+    if not (found_main_def and found_switch_pins):
+        return False
+
+    # The one check that needs the end of the file - read just that end,
+    # not everything before it.
+    tail_len = min(size, 64)
+    with open(path, "rb") as handle:
+        handle.seek(size - tail_len)
+        tail = handle.read(tail_len)
+    return tail.rstrip().endswith(b"main()")
 
 
 # ------------------------------------------------------------- responses --
