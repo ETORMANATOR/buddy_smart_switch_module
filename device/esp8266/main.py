@@ -138,7 +138,7 @@ DEVICE_TYPE = "esp8266"
 # The Pi reads this same line out of the copy it fetched from GitHub, which is
 # how "update available" is decided - so the string has to stay easy to find:
 # one line, plain quotes, nothing computed.
-FIRMWARE_VERSION = "1.0.0"
+FIRMWARE_VERSION = "1.0.1"
 
 # Where `POST /update` fetches new firmware from when it is not told
 # otherwise. Set it per module in config.json ("firmware_url"), or pass a url
@@ -1195,6 +1195,19 @@ def main():
             conn, _ = sock.accept()
         except OSError:
             continue            # the one-second timeout; back round the loop
+
+        # Every request is handled to completion before the next accept() -
+        # one socket, one thread, so this loop is already the queue: whoever
+        # is waiting simply waits for their turn. What was missing is a
+        # bound on how long a turn can take. An accepted connection has no
+        # timeout of its own by default, so a client that connects and then
+        # sends nothing - a stalled network, a bare port probe - left recv()
+        # blocking forever, which held up not just that request but every
+        # request behind it, the heartbeat, and the reset button. A few
+        # seconds is generous for a real HTTP client and short enough that
+        # one bad connection cannot indefinitely stall the ones queued
+        # behind it.
+        conn.settimeout(5)
 
         try:
             method, path, body = read_request(conn)
