@@ -134,7 +134,7 @@ DEVICE_TYPE = "esp32"
 # The Pi reads this same line out of the copy it fetched from GitHub, which is
 # how "update available" is decided - so the string has to stay easy to find:
 # one line, plain quotes, nothing computed.
-FIRMWARE_VERSION = "1.10.2"
+FIRMWARE_VERSION = "1.10.3"
 
 # Where `POST /update` fetches new firmware from when it is not told
 # otherwise. Set it per module in config.json ("firmware_url"), or pass a url
@@ -241,7 +241,18 @@ def default_config():
         # How many relays, not what they are called. The names follow the
         # count - switch1..switchN - and the Pi labels them for people.
         "switch_count": 6,
-        "wifi_ssid": "Buddy-Modules",
+        # Empty, not "Buddy-Modules" - is_provisioned() below treats any
+        # non-empty wifi_ssid as this board's own house network and tries
+        # join_wifi() with it before ever falling back to
+        # join_setup_hotspot(). "Buddy-Modules" here used to make an
+        # unclaimed board (or one with no config.json at all) look
+        # provisioned onto Buddy-Modules with a blank password - which
+        # join_wifi() then spent up to three attempts x 20 seconds failing
+        # to join, before falling back to the one path that was ever going
+        # to work. join_setup_hotspot() already knows the real SSID and
+        # password for Buddy-Modules; this default has no reason to guess
+        # at them too, wrongly.
+        "wifi_ssid": "",
         "wifi_pass": "",
         "pi_url": "http://192.168.1.60:8000",
         "device_key": "",
@@ -359,14 +370,20 @@ def factory_reset(switches=None):
     except OSError:
         pass
 
+    # Written either way, even when kept is empty - a reset must never leave
+    # config.json missing. Loading nothing back later is not the same as
+    # finding nothing there to load: the first is load_config() reading an
+    # empty file and correctly falling in behind default_config(); the
+    # second is a board that inspecting config.json over USB shows nothing
+    # at all, with no way to tell "reset" from "never touched this file".
     if kept:
         print("  keeping: %s" % ", ".join("%s=%s" % (k, kept[k])
                                           for k in sorted(kept)))
-        try:
-            with open(CONFIG_FILE, "w") as handle:
-                json.dump(kept, handle)
-        except OSError as exc:
-            print("  could not keep it: %s" % exc)
+    try:
+        with open(CONFIG_FILE, "w") as handle:
+            json.dump(kept, handle)
+    except OSError as exc:
+        print("  could not write config.json: %s" % exc)
 
     time.sleep(0.5)
     machine.reset()

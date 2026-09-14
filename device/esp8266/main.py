@@ -138,7 +138,7 @@ DEVICE_TYPE = "esp8266"
 # The Pi reads this same line out of the copy it fetched from GitHub, which is
 # how "update available" is decided - so the string has to stay easy to find:
 # one line, plain quotes, nothing computed.
-FIRMWARE_VERSION = "1.0.3"
+FIRMWARE_VERSION = "1.0.4"
 
 # Where `POST /update` fetches new firmware from when it is not told
 # otherwise. Set it per module in config.json ("firmware_url"), or pass a url
@@ -360,14 +360,20 @@ def factory_reset(switches=None):
     except OSError:
         pass
 
+    # Written either way, even when kept is empty - a reset must never leave
+    # config.json missing. Loading nothing back later is not the same as
+    # finding nothing there to load: the first is load_config() reading an
+    # empty file and correctly falling in behind default_config(); the
+    # second is a board that inspecting config.json over USB shows nothing
+    # at all, with no way to tell "reset" from "never touched this file".
     if kept:
         print("  keeping: %s" % ", ".join("%s=%s" % (k, kept[k])
                                           for k in sorted(kept)))
-        try:
-            with open(CONFIG_FILE, "w") as handle:
-                json.dump(kept, handle)
-        except OSError as exc:
-            print("  could not keep it: %s" % exc)
+    try:
+        with open(CONFIG_FILE, "w") as handle:
+            json.dump(kept, handle)
+    except OSError as exc:
+        print("  could not write config.json: %s" % exc)
 
     time.sleep(0.5)
     machine.reset()
