@@ -165,7 +165,7 @@ RELAY_ON, RELAY_OFF = 1, 0
 
 # How often the board tells the Pi it is alive. The Pi calls a device offline
 # after missing a few of these, so it wants to be well under that.
-HEARTBEAT_SECONDS = 60
+HEARTBEAT_SECONDS = 10
 
 # A heartbeat gone unanswered this many times in a row, while the radio still
 # insists it is connected, means the radio is wrong: the association survived
