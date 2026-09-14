@@ -134,7 +134,7 @@ DEVICE_TYPE = "esp32"
 # The Pi reads this same line out of the copy it fetched from GitHub, which is
 # how "update available" is decided - so the string has to stay easy to find:
 # one line, plain quotes, nothing computed.
-FIRMWARE_VERSION = "1.9.0"
+FIRMWARE_VERSION = "1.10.0"
 
 # Where `POST /update` fetches new firmware from when it is not told
 # otherwise. Set it per module in config.json ("firmware_url"), or pass a url
@@ -177,6 +177,16 @@ HEARTBEAT_SECONDS = 60
 # same either way - drop the association and let the loop below rejoin from
 # nothing, rather than trusting a link that has proven it is not one.
 FAILED_HEARTBEATS_BEFORE_RECONNECT = 3
+
+# Heartbeat ticks in a row with no network at all - neither the board's own
+# WiFi nor the Pi's Buddy-Modules hotspot - before trying a full reboot. A
+# dropped association is what the reconnect above is for; this is the next
+# rung up, for a radio that will not even rejoin from nothing, which
+# power-cycling the board has been the only reliable fix for. Ten misses at
+# HEARTBEAT_SECONDS each is close to ten minutes dark, chosen deliberately
+# long so a hotspot that is briefly down for its own reasons - the Pi
+# rebooting, someone mid-setup on it - is not mistaken for a stuck radio.
+NO_NETWORK_TICKS_BEFORE_REBOOT = 10
 
 # How long the reset button must be held. Long enough that a knock or a stray
 # finger cannot wipe a board that is working.
@@ -309,26 +319,32 @@ def is_provisioned(config):
 # again. How many relays it has is a fact about the wiring, not about who
 # owns it, so that stays too.
 #
-# The switch states are not identity or wiring - they are the one fact
-# about the physical world this module is in charge of. Resetting who owns
-# a module is not a reason to also plunge whatever it is switching into
-# darkness: a light that was on has no idea an adoption just changed hands,
-# and should not have to.
-KEPT_THROUGH_RESET = ("device_type", "smart_switch_id", "name", "switch_count",
-                      "states")
+# States are deliberately NOT kept. Removing a module from the Pi is meant to
+# leave it safe to find powered on with nobody watching - on a shelf, mid
+# reassignment to a different room - and "whatever it happened to be
+# switching" is not a safe default for that, only "off" is.
+KEPT_THROUGH_RESET = ("device_type", "smart_switch_id", "name", "switch_count")
 
 
-def factory_reset():
-    """Forgets whose module this is. Not what it is, and not what it was doing.
+def factory_reset(switches=None):
+    """Forgets whose module this is, and switches everything off.
 
     The network and the key it was given go. Its identity stays, because
     that is not something being reset means to undo - a module that came
-    back nameless could not even be adopted again without a USB cable. Its
-    switches stay exactly as they were too: on relay 3, off on relay 5,
-    whatever it actually was, since a relay's job is describing the room it
-    is wired into, not who currently owns the module doing the describing.
+    back nameless could not even be adopted again without a USB cable.
+
+    [switches] is optional only so this can still be called with nothing
+    wired up; every real call site has one. Passing it means every relay is
+    physically driven off before the reboot below, rather than left exactly
+    as it was until the reboot's own re-init catches up a moment later -
+    removing a module from the Pi is exactly the moment nobody may be
+    watching what it is switching.
     """
-    print("FACTORY RESET - forgetting the network and the key")
+    print("FACTORY RESET - forgetting the network and the key, "
+         "switching everything off")
+    if switches is not None:
+        switches.set_all(False)
+
     kept = {}
     try:
         config = load_config()
@@ -983,7 +999,7 @@ class Server:
             return self.update(body)
 
         if path == "/factory_reset":
-            factory_reset()   # does not return
+            factory_reset(self.switches)   # does not return
 
         parts = [p for p in path.split("/") if p]
         if len(parts) == 2 and parts[1] in ("on", "off"):
@@ -1018,7 +1034,7 @@ def read_request(conn):
     return method, path, body
 
 
-def watch_reset_button(button, held_since):
+def watch_reset_button(button, held_since, switches):
     """Returns when the hold started, or None while the button is up.
 
     Polled from the accept loop rather than driven by an interrupt: an IRQ
@@ -1031,7 +1047,7 @@ def watch_reset_button(button, held_since):
     if held_since is None:
         return now
     if now - held_since >= RESET_HOLD_SECONDS:
-        factory_reset()
+        factory_reset(switches)
     return held_since
 
 
@@ -1133,10 +1149,11 @@ def main():
     held_since = None
     last_beat = 0
     failed_heartbeats = 0
+    no_network_ticks = 0
     blink = False               # toggles each pass, for the setup blink
 
     while True:
-        held_since = watch_reset_button(button, held_since)
+        held_since = watch_reset_button(button, held_since, switches)
 
         # The resting state of the light, set every pass so the blink keeps
         # going while nothing else happens. The loop turns over about once a
@@ -1182,11 +1199,19 @@ def main():
                 if wlan is not None:
                     server.ip = wlan.ifconfig()[0]
                     print("back on the air - %s" % server.ip)
+                    no_network_ticks = 0
                     if waiting_on_hotspot:
                         announce_to_pi(wlan, config, switches)
 
             if wlan is None:
-                pass                    # still nothing; the AP is up, wait
+                no_network_ticks += 1
+                print("still no network (%d heartbeat%s in a row)"
+                      % (no_network_ticks, "" if no_network_ticks == 1 else "s"))
+                if no_network_ticks >= NO_NETWORK_TICKS_BEFORE_REBOOT:
+                    print("no network for %d heartbeats - rebooting to reset "
+                          "the radio" % no_network_ticks)
+                    time.sleep(1)
+                    machine.reset()
 
             elif waiting_on_hotspot:
                 # On the Pi's setup network, which it can only be reached on

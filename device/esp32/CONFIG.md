@@ -124,10 +124,14 @@ from the Pi it already shares a key with.
 The portal's **Remove** button on a Connected BSSM card, and holding GPIO 0
 to ground for three seconds on the board itself, do the same thing: the
 network and the device key go, so the board comes back up unclaimed and
-ready to be adopted again. Its `smart_switch_id`, its `name`, how many relays
-it has, and what each was last switched to all **stay** — a reset is about
-who owns the module, not what it is or what it was doing. See
-`KEPT_THROUGH_RESET` in `main.py`.
+ready to be adopted again. Its `smart_switch_id`, its `name` and how many
+relays it has all **stay** — a reset is about who owns the module, not what
+it is. See `KEPT_THROUGH_RESET` in `main.py`.
+
+Every relay is switched **off**, and that is not kept either. Removing a
+module is meant to leave it safe to find powered on with nobody watching —
+on a shelf, mid reassignment to a different room — and whatever it happened
+to be switching at the time is not a safe default for that.
 
 Removing it from the portal also asks the module itself to reset, over the
 network, with its current key — best-effort, since that request never gets a
