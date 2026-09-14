@@ -138,7 +138,7 @@ DEVICE_TYPE = "esp8266"
 # The Pi reads this same line out of the copy it fetched from GitHub, which is
 # how "update available" is decided - so the string has to stay easy to find:
 # one line, plain quotes, nothing computed.
-FIRMWARE_VERSION = "1.0.1"
+FIRMWARE_VERSION = "1.0.2"
 
 # Where `POST /update` fetches new firmware from when it is not told
 # otherwise. Set it per module in config.json ("firmware_url"), or pass a url
@@ -168,7 +168,18 @@ RELAY_ON, RELAY_OFF = 1, 0
 
 # How often the board tells the Pi it is alive. The Pi calls a device offline
 # after missing a few of these, so it wants to be well under that.
-HEARTBEAT_SECONDS = 20
+HEARTBEAT_SECONDS = 60
+
+# A heartbeat gone unanswered this many times in a row, while the radio still
+# insists it is connected, means the radio is wrong: the association survived
+# but whatever actually carries packets to the Pi did not, which sitting still
+# never fixes. One miss is a busy Pi or a lost packet - normal, and not worth
+# acting on. This many in a row, on a network that swears it is still up, is
+# the fault the RF association trouble turns into after the fact: not "never
+# joins" but "joined, then quietly stopped carrying anything." The fix is the
+# same either way - drop the association and let the loop below rejoin from
+# nothing, rather than trusting a link that has proven it is not one.
+FAILED_HEARTBEATS_BEFORE_RECONNECT = 3
 
 # How long the reset button must be held. Long enough that a knock or a stray
 # finger cannot wipe a board that is working.
@@ -1120,6 +1131,7 @@ def main():
 
     held_since = None
     last_beat = 0
+    failed_heartbeats = 0
     blink = False               # toggles each pass, for the setup blink
 
     while True:
@@ -1188,8 +1200,27 @@ def main():
                 # landed is what the solid light means.
                 payload = state_payload(config, switches, server.ip)
                 payload["key"] = config.get("device_key", "")
-                post_json(config["pi_url"].rstrip("/") + "/api/esp32/register",
-                          payload)
+                reached = post_json(
+                    config["pi_url"].rstrip("/") + "/api/esp32/register",
+                    payload)
+
+                if reached:
+                    failed_heartbeats = 0
+                else:
+                    failed_heartbeats += 1
+                    print("heartbeat: %d unanswered in a row"
+                          % failed_heartbeats)
+                    if failed_heartbeats >= FAILED_HEARTBEATS_BEFORE_RECONNECT:
+                        print("radio still says connected but the Pi never "
+                              "answers - dropping the association so the "
+                              "next pass can rejoin from nothing")
+                        failed_heartbeats = 0
+                        try:
+                            wlan.disconnect()
+                        except OSError:
+                            pass
+                        wlan = None
+                        waiting_on_hotspot = False
 
         try:
             conn, _ = sock.accept()
