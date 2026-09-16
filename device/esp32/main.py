@@ -38,10 +38,12 @@
 # ------------------------------------------------------------ first power --
 # A board with no config.json is unclaimed, and goes looking for the Pi:
 #
-#   1. It joins the Pi's own network, `Buddy-Modules`, whose name and password
-#      are below. The Pi keeps that network up; it is where the modules live.
-#   2. Having joined, it tells the Pi it exists — the Pi is the gateway on its
-#      own network, so there is nothing to discover.
+#   1. It joins `Buddy-Modules`, whose name and password are below - hosted by
+#      its own bridge device, not the Pi's own radio, so this network being up
+#      says nothing about where the Pi itself actually is.
+#   2. Having joined, it tells the Pi it exists, at pi_url (below) - resolved
+#      over mDNS if that is a ".local" name, since the gateway on this network
+#      is the bridge, not the Pi.
 #   3. The portal lists it. You enter the setup key and a name, and it is
 #      adopted — staying on this same network, with a device key of its own.
 #      There is no handover, so there is no moment when nobody can reach it.
@@ -254,7 +256,7 @@ def default_config():
         # at them too, wrongly.
         "wifi_ssid": "",
         "wifi_pass": "",
-        "pi_url": "http://192.168.1.60:8000",
+        "pi_url": "http://buddy.local:8000",
         "device_key": "",
         "firmware_url": "",
         # What each switch was last set to. Kept so a module comes back after
@@ -629,15 +631,13 @@ def join_wifi(config, timeout=20, attempts=3):
 def announce_to_pi(wlan, config, switches):
     """Tells the Pi this board exists and is waiting to be set up.
 
-    The Pi is the gateway on its own hotspot, so there is nothing to
-    configure and nothing to discover — the board already knows the address
-    of whatever handed it a lease.
+    Buddy-Modules is hosted by its own bridge device now, not the Pi's own
+    radio - the gateway on this network is that bridge, not the Pi, so
+    guessing the Pi's address from wlan.ifconfig()[2] would announce to the
+    wrong device entirely. pi_url (resolved over mDNS if it is a ".local"
+    name - see resolve_host()) is the one address that is actually right
+    regardless of which device is hosting this network.
     """
-    try:
-        gateway = wlan.ifconfig()[2]
-    except Exception:
-        return False
-
     payload = {
         "device_type": device_type(config),
         "firmware_version": FIRMWARE_VERSION,
@@ -647,9 +647,114 @@ def announce_to_pi(wlan, config, switches):
         "switch_count": len(switches.names),
         "max_switches": MAX_SWITCHES,
     }
-    return post_json("http://%s:8000/api/esp32/announce" % gateway, payload)
+    pi_url = config.get("pi_url") or "http://buddy.local:8000"
+    return post_json(pi_url.rstrip("/") + "/api/esp32/announce", payload)
 
 
+
+
+_MDNS_ADDR = ("224.0.0.251", 5353)
+_mdns_cache = {}
+
+
+def _dns_encode_name(name):
+    encoded = b""
+    for part in name.split("."):
+        encoded += bytes([len(part)]) + part.encode()
+    return encoded + b"\x00"
+
+
+def _dns_skip_name(buf, offset):
+    """Advances past one (possibly compressed) DNS name without decoding
+    it - all this needs to know is where the name ends, not what it says.
+    """
+    while True:
+        length = buf[offset]
+        if length == 0:
+            return offset + 1
+        if length & 0xC0 == 0xC0:
+            return offset + 2
+        offset += 1 + length
+
+
+def _dns_first_a_record(reply):
+    """Pulls the first IPv4 address out of an mDNS reply's answer section,
+    or None if there is not one. Only ever asked one question at a time,
+    so the first A record in the answers is the one that matters - no
+    need to match it back against the name asked for.
+    """
+    ancount = (reply[6] << 8) | reply[7]
+    if ancount == 0:
+        return None
+    offset = _dns_skip_name(reply, 12) + 4  # past the echoed question
+    for _ in range(ancount):
+        offset = _dns_skip_name(reply, offset)
+        rtype = (reply[offset] << 8) | reply[offset + 1]
+        rdlength = (reply[offset + 8] << 8) | reply[offset + 9]
+        offset += 10
+        if rtype == 1 and rdlength == 4:  # A record
+            return ".".join(str(b) for b in reply[offset:offset + 4])
+        offset += rdlength
+    return None
+
+
+def resolve_mdns(name, timeout=2):
+    """Resolves a ".local" hostname to an IPv4 address over mDNS.
+
+    socket.getaddrinfo() on this board only ever speaks ordinary DNS, and a
+    router's own DNS server has never heard of "buddy.local" either - that
+    name only means anything over multicast, a different mechanism this
+    board otherwise has no way to speak. Sent with the "QU" bit set (the
+    top bit of the question's class) so an ordinary mDNS responder
+    (avahi-daemon, on the Pi) answers with a direct unicast reply, rather
+    than this needing to join the multicast group just to see one.
+    """
+    question = _dns_encode_name(name) + b"\x00\x01\x80\x01"
+    packet = b"\x42\x42\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00" + question
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(timeout)
+    try:
+        sock.sendto(packet, _MDNS_ADDR)
+        for _ in range(3):
+            reply, _ = sock.recvfrom(512)
+            ip = _dns_first_a_record(reply)
+            if ip:
+                return ip
+    except Exception as exc:
+        print("mdns resolve failed for %s: %s" % (name, exc))
+    finally:
+        sock.close()
+    return None
+
+
+def resolve_host(host):
+    """Turns a ".local" name into the IPv4 address it currently answers at,
+    cached so every heartbeat does not repeat a multicast query of its own.
+    Anything else (a literal IP, or a real DNS name) passes through
+    untouched - there is nothing here for socket.getaddrinfo() to need help
+    with. See forget_resolved_host() for what happens when a cached address
+    stops working.
+    """
+    if not host.endswith(".local"):
+        return host
+    cached = _mdns_cache.get(host)
+    if cached:
+        return cached
+    resolved = resolve_mdns(host)
+    if resolved:
+        _mdns_cache[host] = resolved
+        return resolved
+    return host
+
+
+def forget_resolved_host(host):
+    """Drops a cached mDNS answer once it stops working, so the next call
+    re-resolves instead of retrying the same dead address forever - this
+    is exactly what a Pi that fails over from Ethernet to WiFi backup (or
+    back) looks like from a module's side: same name, different address.
+    """
+    _mdns_cache.pop(host, None)
 
 
 def post_json(url, payload, timeout=4):
@@ -672,10 +777,19 @@ def post_json(url, payload, timeout=4):
             "Connection: close\r\n\r\n%s" % (path, hostport, len(body), body)
         )
 
-        addr = socket.getaddrinfo(host, port)[0][-1]
-        sock = socket.socket()
-        sock.settimeout(timeout)
-        sock.connect(addr)
+        resolved = resolve_host(host)
+        try:
+            addr = socket.getaddrinfo(resolved, port)[0][-1]
+            sock = socket.socket()
+            sock.settimeout(timeout)
+            sock.connect(addr)
+        except OSError:
+            # A cached mDNS answer that no longer connects is exactly what
+            # the Pi moving to a different address looks like - dropping it
+            # is what lets the very next heartbeat re-resolve instead of
+            # retrying the same dead address every HEARTBEAT_SECONDS.
+            forget_resolved_host(host)
+            raise
         sock.send(request.encode())
         reply = sock.recv(256)
         sock.close()
@@ -699,10 +813,14 @@ def fetch_to_file(url, path, timeout=20, limit=200000):
     secure = scheme == "https"
     port = int(port) if port else (443 if secure else 80)
 
-    addr = socket.getaddrinfo(host, port)[0][-1]
-    sock = socket.socket()
-    sock.settimeout(timeout)
-    sock.connect(addr)
+    try:
+        addr = socket.getaddrinfo(resolve_host(host), port)[0][-1]
+        sock = socket.socket()
+        sock.settimeout(timeout)
+        sock.connect(addr)
+    except OSError:
+        forget_resolved_host(host)
+        raise
     if secure:
         # No certificate check: MicroPython on this chip has no trust store
         # to check against. That is why the Pi sends a sha256 with the
@@ -1231,10 +1349,9 @@ def main():
                     machine.reset()
 
             elif waiting_on_hotspot:
-                # On the Pi's setup network, which it can only be reached on
-                # by way of the gateway. Keep saying hello, or the portal
-                # forgets us while somebody is still deciding. Not adopted
-                # yet, so the light stays blinking.
+                # On the setup network, waiting to be adopted. Keep saying
+                # hello, or the portal forgets us while somebody is still
+                # deciding. Not adopted yet, so the light stays blinking.
                 announce_to_pi(wlan, config, switches)
 
             elif config.get("pi_url") and has_identity(config):
