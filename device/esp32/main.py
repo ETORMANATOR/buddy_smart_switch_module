@@ -38,13 +38,19 @@
 # ------------------------------------------------------------ first power --
 # A board with no config.json is unclaimed, and goes looking for the Pi:
 #
-#   1. It joins `Buddy-Modules`, whose name and password are below - hosted by
-#      its own bridge device, not the Pi's own radio, so this network being up
-#      says nothing about where the Pi itself actually is.
-#   2. Having joined, it tells the Pi it exists, at pi_url (below) - resolved
-#      over mDNS if that is a ".local" name, since the gateway on this network
-#      is the bridge, not the Pi.
-#   3. The portal lists it. You enter the setup key and a name, and it is
+#   1. It advertises over Bluetooth (BLE) for BLE_PROVISION_SECONDS, so the Pi
+#      can find and provision it directly with no WiFi involved at all -
+#      proximity is the only thing that lets somebody claim it this way, the
+#      same role Buddy-Modules' shared password played before. See
+#      ble_provision() below.
+#   2. If nothing claims it over BLE in time, it falls back to joining
+#      `Buddy-Modules`, whose name and password are below - hosted by its own
+#      bridge device, not the Pi's own radio, so this network being up says
+#      nothing about where the Pi itself actually is.
+#   3. Having joined that, it tells the Pi it exists, at pi_url (below) -
+#      resolved over mDNS if that is a ".local" name, since the gateway on
+#      this network is the bridge, not the Pi.
+#   4. The portal lists it. You enter the setup key and a name, and it is
 #      adopted — staying on this same network, with a device key of its own.
 #      There is no handover, so there is no moment when nobody can reach it.
 #
@@ -93,6 +99,7 @@ import socket
 import time
 
 import binascii
+import bluetooth
 import hashlib
 import machine
 import network
@@ -136,7 +143,7 @@ DEVICE_TYPE = "esp32"
 # The Pi reads this same line out of the copy it fetched from GitHub, which is
 # how "update available" is decided - so the string has to stay easy to find:
 # one line, plain quotes, nothing computed.
-FIRMWARE_VERSION = "1.10.3"
+FIRMWARE_VERSION = "1.11.2"
 
 # Where `POST /update` fetches new firmware from when it is not told
 # otherwise. Set it per module in config.json ("firmware_url"), or pass a url
@@ -193,6 +200,18 @@ NO_NETWORK_TICKS_BEFORE_REBOOT = 10
 # How long the reset button must be held. Long enough that a knock or a stray
 # finger cannot wipe a board that is working.
 RESET_HOLD_SECONDS = 3
+
+# How long an unclaimed board advertises over Bluetooth before giving up and
+# falling back to join_setup_hotspot(). BLE and WiFi share one radio on this
+# chip, so this has to actually end rather than run alongside anything else -
+# see ble_provision() below.
+#
+# Long enough for an actual person: scanning, reading the result, typing a
+# name and clicking Connect easily takes more than the 20 seconds this was
+# first measured at - a board that gives up and starts hunting for
+# Buddy-Modules mid-adoption is one BleakDeviceNotFoundError away from a
+# confusing "it was right there a second ago."
+BLE_PROVISION_SECONDS = 120
 
 
 # --------------------------------------------------------------- naming --
@@ -324,6 +343,32 @@ def is_provisioned(config):
     the network it was given.
     """
     return bool(str(config.get("wifi_ssid", "")).strip())
+
+
+def apply_provision(config, body):
+    """Writes WiFi credentials and a device key into [config] and saves it -
+    the one thing both the HTTP /provision route and BLE provisioning do,
+    kept in one place rather than two so they cannot quietly drift apart.
+
+    Raises ValueError, with a message fit to hand straight back to whoever
+    called it, on anything wrong with [body].
+    """
+    ssid = str(body.get("ssid", "")).strip()
+    if not ssid:
+        raise ValueError("no wifi ssid given")
+
+    key = str(body.get("device_key", "")).strip()
+    if not key:
+        raise ValueError("no device key supplied; the Pi must send one")
+
+    # A network, somewhere to report to, and a key. Nothing about what this
+    # module is: its id, its name and how many relays it has are set on the
+    # module itself and are not adoption's to rewrite.
+    config["wifi_ssid"] = ssid
+    config["wifi_pass"] = str(body.get("pass", ""))
+    config["pi_url"] = str(body.get("pi_url", "")).strip()
+    config["device_key"] = key
+    save_config(config)
 
 
 # What a factory reset keeps. The asset number and the name are the module's
@@ -570,6 +615,124 @@ def join_setup_hotspot(timeout=HOTSPOT_JOIN_SECONDS):
     except OSError:
         pass
     return None
+
+
+# ------------------------------------------------------------- bluetooth --
+#
+# An unclaimed board's first move: advertise over BLE and see whether the
+# Pi provisions it that way before ever touching WiFi at all. Proximity is
+# the only thing that lets somebody claim a board this way - the same role
+# Buddy-Modules' shared password played before, and no WiFi-AP compatibility
+# is involved on either side, since Bluetooth pairing has nothing to do with
+# WiFi security ciphers.
+#
+# BLE and WiFi share one radio on this chip (time-division multiplexed), so
+# this is deliberately sequential, not concurrent: advertising stops for
+# good, one way or another, before join_setup_hotspot() or join_wifi() ever
+# touches the radio again.
+
+_BLE_SERVICE_UUID = bluetooth.UUID("b17d0001-8888-4c39-9a35-6f6b1a2b3c4d")
+_BLE_INFO_UUID = bluetooth.UUID("b17d0002-8888-4c39-9a35-6f6b1a2b3c4d")
+_BLE_CRED_UUID = bluetooth.UUID("b17d0003-8888-4c39-9a35-6f6b1a2b3c4d")
+_BLE_STATUS_UUID = bluetooth.UUID("b17d0004-8888-4c39-9a35-6f6b1a2b3c4d")
+
+# The GATT server's own per-characteristic buffer defaults to a few bytes
+# regardless of the negotiated MTU - gatts_set_buffer() below is what
+# actually allows a write this long. Measured: without it, a credentials
+# write silently arrives truncated at ~20 bytes with no error on either
+# side, which looks exactly like a malformed payload rather than what it
+# actually is.
+_BLE_CHAR_BUFFER = 256
+
+_IRQ_CENTRAL_DISCONNECT = 2
+_IRQ_GATTS_WRITE = 3
+
+
+def _ble_advertisement(name):
+    name_bytes = name.encode()
+    payload = bytearray()
+    payload += bytes((len(name_bytes) + 1, 0x09)) + name_bytes          # AD: complete local name
+    payload += bytes((17, 0x07)) + bytes(_BLE_SERVICE_UUID)             # AD: 128-bit service UUID
+    return bytes(payload)
+
+
+def ble_provision(config, switches, timeout=BLE_PROVISION_SECONDS):
+    """Advertises this board over BLE and waits up to [timeout] seconds to
+    be provisioned. True the moment credentials are accepted and saved -
+    config.json is already written when this returns, same as after an
+    HTTP /provision; the caller still has to reboot onto the new network.
+    """
+    ble = bluetooth.BLE()
+    ble.active(True)
+    ble.config(mtu=_BLE_CHAR_BUFFER)
+
+    info_char = (_BLE_INFO_UUID, bluetooth.FLAG_READ)
+    cred_char = (_BLE_CRED_UUID, bluetooth.FLAG_WRITE)
+    status_char = (_BLE_STATUS_UUID, bluetooth.FLAG_READ | bluetooth.FLAG_NOTIFY)
+    service = (_BLE_SERVICE_UUID, (info_char, cred_char, status_char))
+    ((info_handle, cred_handle, status_handle),) = \
+        ble.gatts_register_services((service,))
+    ble.gatts_set_buffer(cred_handle, _BLE_CHAR_BUFFER)
+
+    ble.gatts_write(info_handle, json.dumps({
+        "smart_switch_id": smart_switch_id(config),
+        "device_type": device_type(config),
+        "firmware_version": FIRMWARE_VERSION,
+        "name": config.get("name", ""),
+        "switch_count": len(switches.names),
+    }).encode())
+    ble.gatts_write(status_handle, b"idle")
+
+    received = []
+    name = "Buddy-%s" % binascii.hexlify(machine.unique_id())[-4:].decode()
+    adv_payload = _ble_advertisement(name)
+
+    def irq(event, data):
+        if event == _IRQ_GATTS_WRITE:
+            _conn_handle, attr_handle = data
+            if attr_handle == cred_handle:
+                received.append(ble.gatts_read(cred_handle))
+        elif event == _IRQ_CENTRAL_DISCONNECT:
+            # BLE advertising stops the moment a central connects, and
+            # nothing else here starts it again - measured live: a scan
+            # that only connects to read the info characteristic (to show
+            # a board's identity before anyone claims it) leaves the board
+            # silently unadvertised and unfindable for the rest of this
+            # boot, long before credentials ever arrive. Only a central
+            # that actually wrote credentials should be allowed to end
+            # advertising for good.
+            if not received:
+                ble.gap_advertise(100_000, adv_payload)
+
+    ble.irq(irq)
+
+    ble.gap_advertise(100_000, adv_payload)
+    print("BLE advertising as %s (%ds to be provisioned)" % (name, timeout))
+
+    deadline = time.time() + timeout
+    while time.time() < deadline and not received:
+        time.sleep(0.2)
+
+    ok = False
+    if received:
+        ble.gatts_write(status_handle, b"received")
+        try:
+            apply_provision(config, json.loads(received[0]))
+            ble.gatts_write(status_handle, b"ok")
+            ok = True
+        except Exception as exc:
+            print("BLE provision failed: %s" % exc)
+            try:
+                ble.gatts_write(status_handle, ("error: %s" % exc).encode()[:_BLE_CHAR_BUFFER])
+            except Exception:
+                pass
+
+    try:
+        ble.gap_advertise(None)
+    except Exception:
+        pass
+    ble.active(False)
+    return ok
 
 
 def join_wifi(config, timeout=20, attempts=3):
@@ -1004,30 +1167,10 @@ class Server:
         if body.get("key") != PROVISION_KEY:
             return 401, json.dumps({"error": "wrong setup key"})
 
-        ssid = str(body.get("ssid", "")).strip()
-        if not ssid:
-            return 400, json.dumps({"error": "no wifi ssid given"})
-
-        # A network, somewhere to report to, and a key. Nothing about what
-        # this module is: its id, its name and how many relays it has are
-        # set on the module itself and are not adoption's to rewrite.
-        self.config["wifi_ssid"] = ssid
-        self.config["wifi_pass"] = str(body.get("pass", ""))
-        self.config["pi_url"] = str(body.get("pi_url", "")).strip()
-
-        # A key of its own, now that there is something worth protecting: the
-        # setup key opened the door once, and from here the Pi uses this
-        # instead. The Pi makes it, because the module no longer makes
-        # anything about itself up - and a module that is handed no key would
-        # otherwise be left with the setup key as its only protection, which
-        # every module shares.
-        key = str(body.get("device_key", "")).strip()
-        if not key:
-            return 400, json.dumps({
-                "error": "no device key supplied; the Pi must send one",
-            })
-        self.config["device_key"] = key
-        self.save()
+        try:
+            apply_provision(self.config, body)
+        except ValueError as exc:
+            return 400, json.dumps({"error": str(exc)})
 
         self.reboot_after_reply = True
         return json_response({
@@ -1239,6 +1382,11 @@ def main():
         if is_provisioned(config):
             print("could not join '%s' - falling back to the Pi's network"
                   % config.get("wifi_ssid", ""))
+        elif ble_provision(config, switches):
+            print("provisioned over Bluetooth - restarting onto the new network")
+            time.sleep(1)
+            machine.reset()
+
         wlan = join_setup_hotspot()
         if wlan is not None:
             waiting_on_hotspot = True
