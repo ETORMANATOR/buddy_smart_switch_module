@@ -143,7 +143,7 @@ DEVICE_TYPE = "esp32"
 # The Pi reads this same line out of the copy it fetched from GitHub, which is
 # how "update available" is decided - so the string has to stay easy to find:
 # one line, plain quotes, nothing computed.
-FIRMWARE_VERSION = "1.11.2"
+FIRMWARE_VERSION = "1.11.3"
 
 # Where `POST /update` fetches new firmware from when it is not told
 # otherwise. Set it per module in config.json ("firmware_url"), or pass a url
@@ -1385,7 +1385,17 @@ def main():
         elif ble_provision(config, switches):
             print("provisioned over Bluetooth - restarting onto the new network")
             time.sleep(1)
-            machine.reset()
+            # machine.reset() alone was measured, live, to not be enough: the
+            # WiFi join right after kept failing the handshake with a real
+            # router (repeatedly cycling STAT_CONNECTING/STAT_WRONG_PASSWORD)
+            # even with known-correct credentials on a network every other
+            # device joins fine - purely from having briefly used BLE this
+            # same boot, before ever touching WiFi. A short deep-sleep/wake
+            # cycle instead of a plain reset does a more thorough hardware
+            # re-init on this chip and reliably cleared it in that same
+            # testing - a bare reset does not seem to fully release whatever
+            # radio state BLE leaves behind.
+            machine.deepsleep(100)
 
         wlan = join_setup_hotspot()
         if wlan is not None:
