@@ -150,7 +150,7 @@ DEVICE_TYPE = "esp32"
 # The Pi reads this same line out of the copy it fetched from GitHub, which is
 # how "update available" is decided - so the string has to stay easy to find:
 # one line, plain quotes, nothing computed.
-FIRMWARE_VERSION = "1.11.7"
+FIRMWARE_VERSION = "1.11.8"
 
 # Where `POST /update` fetches new firmware from when it is not told
 # otherwise. Set it per module in config.json ("firmware_url"), or pass a url
@@ -216,13 +216,12 @@ FAILED_HEARTBEATS_BEFORE_RECONNECT = 3
 # WiFi nor the Pi's Buddy-Modules hotspot - before trying a full reboot. A
 # dropped association is what the reconnect above is for; this is the next
 # rung up, for a radio that will not even rejoin from nothing, which
-# power-cycling the board has been the only reliable fix for. Twelve misses
-# at HEARTBEAT_SECONDS (10) each is two minutes - requested explicitly,
-# short enough that a board stuck off the network is not left dark for long,
-# at the cost of being more willing than before to reboot through a
-# genuinely brief outage (the Pi restarting, someone mid-setup on it) rather
-# than waiting it out.
-NO_NETWORK_TICKS_BEFORE_REBOOT = 12
+# power-cycling the board has been the only reliable fix for. Thirty misses
+# at HEARTBEAT_SECONDS (10) each is five minutes - requested explicitly,
+# after two minutes proved a bit too eager to reboot through a genuinely
+# brief outage (the Pi restarting, someone mid-setup on it) rather than
+# just waiting it out.
+NO_NETWORK_TICKS_BEFORE_REBOOT = 30
 
 # How long the reset button must be held. Long enough that a knock or a stray
 # finger cannot wipe a board that is working.
