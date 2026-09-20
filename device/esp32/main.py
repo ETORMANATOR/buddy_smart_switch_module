@@ -36,7 +36,9 @@
 #         and advertising over Bluetooth - see RESET_LIGHT_PIN's own
 #         comment for why a strapping pin is used here at all, and how
 #         watch_reset_button() avoids the boot-mode risk that comes with it.
-# GPIO 10 is the status LED.
+# GPIO 10 is the status LED - off with no network, blinking while trying to
+#         join one (WiFi handshake in flight, or sitting on Buddy-Modules
+#         waiting to be adopted), solid once actually on the house network.
 # GPIO 1, 3, 4, 5, 6, 7 drive the relays, in that order, which is why six is
 # the most switches one board can have.
 #
@@ -148,7 +150,7 @@ DEVICE_TYPE = "esp32"
 # The Pi reads this same line out of the copy it fetched from GitHub, which is
 # how "update available" is decided - so the string has to stay easy to find:
 # one line, plain quotes, nothing computed.
-FIRMWARE_VERSION = "1.11.6"
+FIRMWARE_VERSION = "1.11.7"
 
 # Where `POST /update` fetches new firmware from when it is not told
 # otherwise. Set it per module in config.json ("firmware_url"), or pass a url
@@ -773,7 +775,15 @@ def ble_provision(config, switches, timeout=BLE_PROVISION_SECONDS, light=None):
 
 
 def join_wifi(config, timeout=20, attempts=3):
-    """Joins the saved network. None when it cannot."""
+    """Joins the saved network. None when it cannot.
+
+    Blinks STATUS_LED_PIN (_status_led, set by main() before this is ever
+    called - both at boot and on every runtime reconnect attempt) for as
+    long as a connection attempt is actually in flight, so "trying right
+    now" reads differently from "off" (nothing to try) - off again the
+    moment this returns, one way or the other; the caller's own loop
+    decides what the light means past that point.
+    """
     ssid = config.get("wifi_ssid", "")
     if not ssid:
         return None
@@ -815,10 +825,17 @@ def join_wifi(config, timeout=20, attempts=3):
             continue
 
         waited = 0
+        blink = False
         while not wlan.isconnected() and waited < timeout:
+            if _status_led is not None:
+                blink = not blink
+                _status_led.value(1 if blink else 0)
             time.sleep(0.5)
             waited += 0.5
             print(".", end="")
+
+        if _status_led is not None:
+            _status_led.value(0)
 
         if wlan.isconnected():
             print(" ok — %s" % wlan.ifconfig()[0])
@@ -1505,8 +1522,10 @@ def main():
         # going while nothing else happens. The loop turns over about once a
         # second (the socket timeout below), a slow readable blink.
         #
-        #   off      no network
-        #   blink    on Buddy-Modules, waiting to be adopted (setup indicator)
+        #   off      no network, and not currently trying either
+        #   blink    on Buddy-Modules, waiting to be adopted (setup indicator) -
+        #            join_wifi() also blinks this same light itself, for as
+        #            long as a WiFi connection attempt is actually in flight
         #   solid    on the house network handed over by the Pi, set up
         if led:
             if wlan is None:
