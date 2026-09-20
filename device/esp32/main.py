@@ -28,9 +28,14 @@
 # ---------------------------------------------------------------- the pins --
 # On the ESP32-C3, DO NOT use: 11-17 (flash), 18/19 (USB), 20/21 (serial),
 # and avoid 2, 8, 9 (strapping pins — they change how the chip boots).
-# That leaves GPIO 0, 1, 3, 4, 5, 6, 7, 10.
+# That leaves GPIO 0, 1, 3, 4, 5, 6, 7, 10 - plus 9, used anyway below for
+# one specific thing, carefully.
 #
 # GPIO 0  is the reset button (to GND) — see FACTORY RESET below.
+# GPIO 9  lights for as long as the reset button is held - see
+#         RESET_LIGHT_PIN's own comment for why a strapping pin is used here
+#         at all, and how watch_reset_button() avoids the boot-mode risk
+#         that comes with it.
 # GPIO 10 is the status LED.
 # GPIO 1, 3, 4, 5, 6, 7 drive the relays, in that order, which is why six is
 # the most switches one board can have.
@@ -143,7 +148,7 @@ DEVICE_TYPE = "esp32"
 # The Pi reads this same line out of the copy it fetched from GitHub, which is
 # how "update available" is decided - so the string has to stay easy to find:
 # one line, plain quotes, nothing computed.
-FIRMWARE_VERSION = "1.11.3"
+FIRMWARE_VERSION = "1.11.4"
 
 # Where `POST /update` fetches new firmware from when it is not told
 # otherwise. Set it per module in config.json ("firmware_url"), or pass a url
@@ -168,6 +173,17 @@ MAX_SWITCHES = len(SWITCH_PINS)
 
 RESET_PIN = 0
 STATUS_LED_PIN = 10
+
+# Lit for as long as the reset button is held, so pressing it says something
+# back before the 3 seconds are even up. GPIO9 is a boot-mode strapping pin
+# on the ESP32-C3 (see the pin notes at the top of this file - it's one of
+# the ones to avoid) - safe to drive during normal running, since strapping
+# is only sampled at reset, but watch_reset_button() below explicitly turns
+# it off again right before the machine.reset() a completed hold triggers.
+# Left driven low at that exact instant, an active-low LED here would pull
+# the chip into UART download mode on the next boot instead of running
+# main.py - indistinguishable from a bricked board until someone notices.
+RESET_LIGHT_PIN = 9
 
 # Most relay boards energise on HIGH. Low-trigger boards want these swapped.
 RELAY_ON, RELAY_OFF = 1, 0
@@ -1312,19 +1328,31 @@ def read_request(conn):
     return method, path, body
 
 
-def watch_reset_button(button, held_since, switches):
+def watch_reset_button(button, held_since, switches, light=None):
     """Returns when the hold started, or None while the button is up.
 
     Polled from the accept loop rather than driven by an interrupt: an IRQ
     that fires while the socket is mid-reply is a good way to corrupt a
     response, and three seconds is not a deadline worth racing for.
+
+    [light] (RESET_LIGHT_PIN) is on for as long as the button is held,
+    turned off the moment it's released early - and turned off first thing
+    on a completed hold too, before factory_reset() below reboots the
+    board. See RESET_LIGHT_PIN's own comment for why that specific
+    ordering matters on this pin.
     """
     if button is None or button.value() == 1:      # pull-up: 1 is released
+        if light is not None:
+            light.value(0)
         return None
+    if light is not None:
+        light.value(1)
     now = time.time()
     if held_since is None:
         return now
     if now - held_since >= RESET_HOLD_SECONDS:
+        if light is not None:
+            light.value(0)
         factory_reset(switches)
     return held_since
 
@@ -1351,6 +1379,10 @@ def main():
         button = Pin(RESET_PIN, Pin.IN, Pin.PULL_UP)
     except ValueError:
         button = None
+    try:
+        reset_light = Pin(RESET_LIGHT_PIN, Pin.OUT, value=0)
+    except ValueError:
+        reset_light = None
 
     server = Server(config, switches)
 
@@ -1446,7 +1478,7 @@ def main():
     blink = False               # toggles each pass, for the setup blink
 
     while True:
-        held_since = watch_reset_button(button, held_since, switches)
+        held_since = watch_reset_button(button, held_since, switches, reset_light)
 
         # The resting state of the light, set every pass so the blink keeps
         # going while nothing else happens. The loop turns over about once a
