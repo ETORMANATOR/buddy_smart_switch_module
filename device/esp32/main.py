@@ -32,10 +32,10 @@
 # one specific thing, carefully.
 #
 # GPIO 0  is the reset button (to GND) — see FACTORY RESET below.
-# GPIO 9  lights for as long as the reset button is held - see
-#         RESET_LIGHT_PIN's own comment for why a strapping pin is used here
-#         at all, and how watch_reset_button() avoids the boot-mode risk
-#         that comes with it.
+# GPIO 9  solid while the reset button is held, blinking while unclaimed
+#         and advertising over Bluetooth - see RESET_LIGHT_PIN's own
+#         comment for why a strapping pin is used here at all, and how
+#         watch_reset_button() avoids the boot-mode risk that comes with it.
 # GPIO 10 is the status LED.
 # GPIO 1, 3, 4, 5, 6, 7 drive the relays, in that order, which is why six is
 # the most switches one board can have.
@@ -148,7 +148,7 @@ DEVICE_TYPE = "esp32"
 # The Pi reads this same line out of the copy it fetched from GitHub, which is
 # how "update available" is decided - so the string has to stay easy to find:
 # one line, plain quotes, nothing computed.
-FIRMWARE_VERSION = "1.11.4"
+FIRMWARE_VERSION = "1.11.5"
 
 # Where `POST /update` fetches new firmware from when it is not told
 # otherwise. Set it per module in config.json ("firmware_url"), or pass a url
@@ -174,15 +174,22 @@ MAX_SWITCHES = len(SWITCH_PINS)
 RESET_PIN = 0
 STATUS_LED_PIN = 10
 
-# Lit for as long as the reset button is held, so pressing it says something
-# back before the 3 seconds are even up. GPIO9 is a boot-mode strapping pin
-# on the ESP32-C3 (see the pin notes at the top of this file - it's one of
-# the ones to avoid) - safe to drive during normal running, since strapping
-# is only sampled at reset, but watch_reset_button() below explicitly turns
-# it off again right before the machine.reset() a completed hold triggers.
-# Left driven low at that exact instant, an active-low LED here would pull
-# the chip into UART download mode on the next boot instead of running
-# main.py - indistinguishable from a bricked board until someone notices.
+# Two meanings on one pin, never at the same time (see ble_provision() and
+# watch_reset_button() below - the reset button is only ever watched after
+# BLE provisioning has already finished for this boot, one way or another):
+#   solid  - the reset button is being held, so pressing it says something
+#            back before the 3 seconds are even up.
+#   blink  - unclaimed and advertising over Bluetooth, waiting to be
+#            provisioned - the same "waiting to be claimed" moment
+#            STATUS_LED_PIN blinks for on the WiFi-hotspot route.
+# GPIO9 is a boot-mode strapping pin on the ESP32-C3 (see the pin notes at
+# the top of this file - it's one of the ones to avoid) - safe to drive
+# during normal running, since strapping is only sampled at reset, but
+# watch_reset_button() below explicitly turns it off again right before the
+# machine.reset() a completed hold triggers. Left driven low at that exact
+# instant, an active-low LED here would pull the chip into UART download
+# mode on the next boot instead of running main.py - indistinguishable from
+# a bricked board until someone notices.
 RESET_LIGHT_PIN = 9
 
 # Most relay boards energise on HIGH. Low-trigger boards want these swapped.
@@ -672,11 +679,17 @@ def _ble_advertisement(name):
     return bytes(payload)
 
 
-def ble_provision(config, switches, timeout=BLE_PROVISION_SECONDS):
+def ble_provision(config, switches, timeout=BLE_PROVISION_SECONDS, light=None):
     """Advertises this board over BLE and waits up to [timeout] seconds to
     be provisioned. True the moment credentials are accepted and saved -
     config.json is already written when this returns, same as after an
     HTTP /provision; the caller still has to reboot onto the new network.
+
+    [light] (RESET_LIGHT_PIN) blinks for as long as this is waiting to be
+    provisioned - the same pin the reset button lights solid, so "blinking"
+    versus "solid" is what tells the two situations apart at a glance. No
+    conflict between them in practice: this runs once, before the reset
+    button is ever watched (see main()), never alongside it.
     """
     ble = bluetooth.BLE()
     ble.active(True)
@@ -726,8 +739,14 @@ def ble_provision(config, switches, timeout=BLE_PROVISION_SECONDS):
     print("BLE advertising as %s (%ds to be provisioned)" % (name, timeout))
 
     deadline = time.time() + timeout
+    blink = False
     while time.time() < deadline and not received:
+        if light is not None:
+            blink = not blink
+            light.value(1 if blink else 0)
         time.sleep(0.2)
+    if light is not None:
+        light.value(0)
 
     ok = False
     if received:
@@ -1414,7 +1433,7 @@ def main():
         if is_provisioned(config):
             print("could not join '%s' - falling back to the Pi's network"
                   % config.get("wifi_ssid", ""))
-        elif ble_provision(config, switches):
+        elif ble_provision(config, switches, light=reset_light):
             print("provisioned over Bluetooth - restarting onto the new network")
             time.sleep(1)
             # machine.reset() alone was measured, live, to not be enough: the
