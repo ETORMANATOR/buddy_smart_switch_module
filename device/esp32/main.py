@@ -150,7 +150,7 @@ DEVICE_TYPE = "esp32"
 # The Pi reads this same line out of the copy it fetched from GitHub, which is
 # how "update available" is decided - so the string has to stay easy to find:
 # one line, plain quotes, nothing computed.
-FIRMWARE_VERSION = "1.11.8"
+FIRMWARE_VERSION = "1.11.9"
 
 # Where `POST /update` fetches new firmware from when it is not told
 # otherwise. Set it per module in config.json ("firmware_url"), or pass a url
@@ -212,16 +212,14 @@ HEARTBEAT_SECONDS = 10
 # nothing, rather than trusting a link that has proven it is not one.
 FAILED_HEARTBEATS_BEFORE_RECONNECT = 3
 
-# Heartbeat ticks in a row with no network at all - neither the board's own
-# WiFi nor the Pi's Buddy-Modules hotspot - before trying a full reboot. A
-# dropped association is what the reconnect above is for; this is the next
-# rung up, for a radio that will not even rejoin from nothing, which
-# power-cycling the board has been the only reliable fix for. Thirty misses
-# at HEARTBEAT_SECONDS (10) each is five minutes - requested explicitly,
-# after two minutes proved a bit too eager to reboot through a genuinely
-# brief outage (the Pi restarting, someone mid-setup on it) rather than
-# just waiting it out.
-NO_NETWORK_TICKS_BEFORE_REBOOT = 30
+# No automatic reboot-on-no-network any more (tried at 2 minutes, then 5 -
+# removed outright: on a board that genuinely cannot join its WiFi at all,
+# rebooting on a timer was just cycling through the same failure
+# indefinitely, never actually fixing anything, and briefly made
+# `mpremote`/serial access harder to time right while it kept happening.
+# The loop below still keeps retrying forever on its own; a board stuck
+# like this needs the real problem (signal, credentials, the router)
+# looked at, not a reboot.
 
 # How long the reset button must be held. Long enough that a knock or a stray
 # finger cannot wipe a board that is working.
@@ -1511,7 +1509,6 @@ def main():
     held_since = None
     last_beat = 0
     failed_heartbeats = 0
-    no_network_ticks = 0
     blink = False               # toggles each pass, for the setup blink
 
     while True:
@@ -1563,19 +1560,11 @@ def main():
                 if wlan is not None:
                     server.ip = wlan.ifconfig()[0]
                     print("back on the air - %s" % server.ip)
-                    no_network_ticks = 0
                     if waiting_on_hotspot:
                         announce_to_pi(wlan, config, switches)
 
             if wlan is None:
-                no_network_ticks += 1
-                print("still no network (%d heartbeat%s in a row)"
-                      % (no_network_ticks, "" if no_network_ticks == 1 else "s"))
-                if no_network_ticks >= NO_NETWORK_TICKS_BEFORE_REBOOT:
-                    print("no network for %d heartbeats - rebooting to reset "
-                          "the radio" % no_network_ticks)
-                    time.sleep(1)
-                    machine.reset()
+                print("still no network")
 
             elif waiting_on_hotspot:
                 # On the setup network, waiting to be adopted. Keep saying
