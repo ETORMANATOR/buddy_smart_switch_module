@@ -146,7 +146,7 @@ DEVICE_TYPE = "esp32"
 # The Pi reads this same line out of the copy it fetched from GitHub, which is
 # how "update available" is decided - so the string has to stay easy to find:
 # one line, plain quotes, nothing computed.
-FIRMWARE_VERSION = "1.11.13"
+FIRMWARE_VERSION = "1.11.14"
 
 # Where `POST /update` fetches new firmware from when it is not told
 # otherwise. Set it per module in config.json ("firmware_url"), or pass a url
@@ -774,20 +774,22 @@ def ble_provision(config, switches, button=None, light=None):
     return ok
 
 
-def join_wifi(config, timeout=20, attempts=6, button=None, switches=None):
-    """Joins the saved network. None when it cannot.
+def join_wifi(config, timeout=20, attempts=None, button=None, switches=None):
+    """Joins the saved network. None when it cannot (only ever happens when
+    [attempts] is given a real number - the default keeps trying forever).
 
-    [attempts] defaults higher than a runtime reconnect ever asks for
-    (those pass 1 explicitly) - only the boot-time call is affected, and
-    that is deliberate: watched live, the very first attempt right after a
-    cold power-on (board off for a while, then powered back up) fails far
-    more often than a later one on this same board/router pairing, then
-    usually succeeds within two or three more tries. Giving the boot
-    sequence six chances instead of three roughly doubles how long it will
-    keep trying before falling back to the Pi's setup network - worth it
-    now that a board stuck here is no longer the dead end it used to be:
-    the reset button works mid-attempt (see below) and a 5-minute
-    no-network reboot is still there behind both of those.
+    [attempts] is None by default - unlimited - and only the boot-time
+    call actually gets that; every runtime reconnect passes 1 explicitly,
+    tried exactly once per heartbeat tick as before. Watched live, even
+    six tries in a row can still fail on a bad connection, and there is no
+    number of attempts that is the "right" amount to give up at - a board
+    that cannot join yet might join on try 20, or after the router's own
+    problem is fixed an hour from now, and it should still come up on its
+    own the moment that happens rather than sitting wherever it gave up.
+    Safe to leave unbounded now in a way it was not before: the reset
+    button works mid-attempt (see below) and a 5-minute no-network reboot
+    is still there behind both of those, so "unlimited" no longer means
+    "no way out" if it needs to be interrupted.
 
     Blinks STATUS_LED_PIN (_status_led, set by main() before this is ever
     called - both at boot and on every runtime reconnect attempt) for as
@@ -798,18 +800,20 @@ def join_wifi(config, timeout=20, attempts=6, button=None, switches=None):
 
     [button] (RESET_PIN) is also watched during the wait below, not just
     from the caller's own loop - a single attempt can block for up to
-    [timeout] seconds, several attempts back to back at boot several
-    times that, and the caller's own watch_reset_button() call never runs
-    at all while this function hasn't returned yet. A hold that starts and
-    finishes entirely inside one of those windows would otherwise never be
-    seen - worst of all on exactly the board that most needs resetting
-    right now: one stuck cycling through failed joins indefinitely.
+    [timeout] seconds, and the boot-time call can now retry indefinitely,
+    during all of which the caller's own watch_reset_button() call never
+    runs at all. A hold that starts and finishes entirely inside one of
+    those windows would otherwise never be seen - worst of all on exactly
+    the board that most needs resetting right now: one stuck cycling
+    through failed joins indefinitely.
     """
     ssid = config.get("wifi_ssid", "")
     if not ssid:
         return None
 
-    for attempt in range(1, attempts + 1):
+    attempt = 0
+    while attempts is None or attempt < attempts:
+        attempt += 1
         wlan = network.WLAN(network.STA_IF)
         try:
             if wlan.isconnected():
@@ -837,7 +841,9 @@ def join_wifi(config, timeout=20, attempts=6, button=None, switches=None):
             pass
         time.sleep(1)
 
-        print("Joining '%s' (%d/%d)" % (ssid, attempt, attempts), end="")
+        print("Joining '%s' (%d%s)" % (
+            ssid, attempt, "/%d" % attempts if attempts is not None else ""
+        ), end="")
         try:
             wlan.connect(ssid, config.get("wifi_pass", ""))
         except OSError as exc:
