@@ -150,7 +150,7 @@ DEVICE_TYPE = "esp32"
 # The Pi reads this same line out of the copy it fetched from GitHub, which is
 # how "update available" is decided - so the string has to stay easy to find:
 # one line, plain quotes, nothing computed.
-FIRMWARE_VERSION = "1.11.9"
+FIRMWARE_VERSION = "1.11.10"
 
 # Where `POST /update` fetches new firmware from when it is not told
 # otherwise. Set it per module in config.json ("firmware_url"), or pass a url
@@ -771,7 +771,7 @@ def ble_provision(config, switches, timeout=BLE_PROVISION_SECONDS, light=None):
     return ok
 
 
-def join_wifi(config, timeout=20, attempts=3):
+def join_wifi(config, timeout=20, attempts=3, button=None, switches=None):
     """Joins the saved network. None when it cannot.
 
     Blinks STATUS_LED_PIN (_status_led, set by main() before this is ever
@@ -780,6 +780,15 @@ def join_wifi(config, timeout=20, attempts=3):
     now" reads differently from "off" (nothing to try) - off again the
     moment this returns, one way or the other; the caller's own loop
     decides what the light means past that point.
+
+    [button] (RESET_PIN) is also watched during the wait below, not just
+    from the caller's own loop - a single attempt can block for up to
+    [timeout] seconds, three attempts back to back at boot up to three
+    times that, and the caller's own watch_reset_button() call never runs
+    at all while this function hasn't returned yet. A hold that starts and
+    finishes entirely inside one of those windows would otherwise never be
+    seen - worst of all on exactly the board that most needs resetting
+    right now: one stuck cycling through failed joins indefinitely.
     """
     ssid = config.get("wifi_ssid", "")
     if not ssid:
@@ -823,10 +832,12 @@ def join_wifi(config, timeout=20, attempts=3):
 
         waited = 0
         blink = False
+        held_since = None
         while not wlan.isconnected() and waited < timeout:
             if _status_led is not None:
                 blink = not blink
                 _status_led.value(1 if blink else 0)
+            held_since = watch_reset_button(button, held_since, switches)
             time.sleep(0.5)
             waited += 0.5
             print(".", end="")
@@ -1135,6 +1146,11 @@ def looks_like_firmware(path):
 
 _status_led = None
 
+# Set by main() before either watch_reset_button() or join_wifi() (which
+# also calls it, see there) is ever called - a global for the same reason
+# _status_led is one: both need it, and neither owns it.
+_reset_light = None
+
 
 def wink_twice():
     """Two quick blinks for a request, then back to the resting state.
@@ -1363,31 +1379,36 @@ def read_request(conn):
     return method, path, body
 
 
-def watch_reset_button(button, held_since, switches, light=None):
+def watch_reset_button(button, held_since, switches):
     """Returns when the hold started, or None while the button is up.
 
     Polled from the accept loop rather than driven by an interrupt: an IRQ
     that fires while the socket is mid-reply is a good way to corrupt a
-    response, and three seconds is not a deadline worth racing for.
+    response, and three seconds is not a deadline worth racing for. Also
+    called from inside join_wifi()'s own wait loop, not only from here -
+    see that function's docstring for why - which is why this reads
+    _reset_light as a global rather than taking it as a parameter: both
+    call sites need it, and threading it through join_wifi()'s signature
+    just to hand it straight back here would be pure ceremony.
 
-    [light] (RESET_LIGHT_PIN) is on for as long as the button is held,
-    turned off the moment it's released early - and turned off first thing
-    on a completed hold too, before factory_reset() below reboots the
-    board. See RESET_LIGHT_PIN's own comment for why that specific
-    ordering matters on this pin.
+    _reset_light (RESET_LIGHT_PIN) is on for as long as the button is
+    held, turned off the moment it's released early - and turned off
+    first thing on a completed hold too, before factory_reset() below
+    reboots the board. See RESET_LIGHT_PIN's own comment for why that
+    specific ordering matters on this pin.
     """
     if button is None or button.value() == 1:      # pull-up: 1 is released
-        if light is not None:
-            light.value(0)
+        if _reset_light is not None:
+            _reset_light.value(0)
         return None
-    if light is not None:
-        light.value(1)
+    if _reset_light is not None:
+        _reset_light.value(1)
     now = time.time()
     if held_since is None:
         return now
     if now - held_since >= RESET_HOLD_SECONDS:
-        if light is not None:
-            light.value(0)
+        if _reset_light is not None:
+            _reset_light.value(0)
         factory_reset(switches)
     return held_since
 
@@ -1407,7 +1428,7 @@ def main():
     switches = Switches(switch_names(config["switch_count"]),
                         config.get("states"), remember)
 
-    global _status_led
+    global _status_led, _reset_light
     led = Pin(STATUS_LED_PIN, Pin.OUT, value=0) if STATUS_LED_PIN is not None else None
     _status_led = led
     try:
@@ -1415,9 +1436,9 @@ def main():
     except ValueError:
         button = None
     try:
-        reset_light = Pin(RESET_LIGHT_PIN, Pin.OUT, value=0)
+        _reset_light = Pin(RESET_LIGHT_PIN, Pin.OUT, value=0)
     except ValueError:
-        reset_light = None
+        _reset_light = None
 
     server = Server(config, switches)
 
@@ -1438,7 +1459,7 @@ def main():
         print("=" * 52)
         print("")
 
-    wlan = join_wifi(config) if is_provisioned(config) else None
+    wlan = join_wifi(config, button=button, switches=switches) if is_provisioned(config) else None
     waiting_on_hotspot = False
 
     if wlan is None:
@@ -1449,7 +1470,7 @@ def main():
         if is_provisioned(config):
             print("could not join '%s' - falling back to the Pi's network"
                   % config.get("wifi_ssid", ""))
-        elif ble_provision(config, switches, light=reset_light):
+        elif ble_provision(config, switches, light=_reset_light):
             print("provisioned over Bluetooth - restarting onto the new network")
             time.sleep(1)
             # machine.reset() alone was measured, live, to not be enough: the
@@ -1512,7 +1533,7 @@ def main():
     blink = False               # toggles each pass, for the setup blink
 
     while True:
-        held_since = watch_reset_button(button, held_since, switches, reset_light)
+        held_since = watch_reset_button(button, held_since, switches)
 
         # The resting state of the light, set every pass so the blink keeps
         # going while nothing else happens. The loop turns over about once a
@@ -1550,7 +1571,7 @@ def main():
                 # Pi's setup network may not even exist most of the time. It
                 # comes and goes with whoever is adopting modules.
                 if is_provisioned(config):
-                    wlan = join_wifi(config, attempts=1)
+                    wlan = join_wifi(config, attempts=1, button=button, switches=switches)
                 if wlan is not None:
                     waiting_on_hotspot = False
                 else:
