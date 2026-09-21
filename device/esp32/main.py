@@ -150,7 +150,7 @@ DEVICE_TYPE = "esp32"
 # The Pi reads this same line out of the copy it fetched from GitHub, which is
 # how "update available" is decided - so the string has to stay easy to find:
 # one line, plain quotes, nothing computed.
-FIRMWARE_VERSION = "1.11.11"
+FIRMWARE_VERSION = "1.11.12"
 
 # Where `POST /update` fetches new firmware from when it is not told
 # otherwise. Set it per module in config.json ("firmware_url"), or pass a url
@@ -775,8 +775,20 @@ def ble_provision(config, switches, timeout=BLE_PROVISION_SECONDS, light=None):
     return ok
 
 
-def join_wifi(config, timeout=20, attempts=3, button=None, switches=None):
+def join_wifi(config, timeout=20, attempts=6, button=None, switches=None):
     """Joins the saved network. None when it cannot.
+
+    [attempts] defaults higher than a runtime reconnect ever asks for
+    (those pass 1 explicitly) - only the boot-time call is affected, and
+    that is deliberate: watched live, the very first attempt right after a
+    cold power-on (board off for a while, then powered back up) fails far
+    more often than a later one on this same board/router pairing, then
+    usually succeeds within two or three more tries. Giving the boot
+    sequence six chances instead of three roughly doubles how long it will
+    keep trying before falling back to the Pi's setup network - worth it
+    now that a board stuck here is no longer the dead end it used to be:
+    the reset button works mid-attempt (see below) and a 5-minute
+    no-network reboot is still there behind both of those.
 
     Blinks STATUS_LED_PIN (_status_led, set by main() before this is ever
     called - both at boot and on every runtime reconnect attempt) for as
@@ -787,7 +799,7 @@ def join_wifi(config, timeout=20, attempts=3, button=None, switches=None):
 
     [button] (RESET_PIN) is also watched during the wait below, not just
     from the caller's own loop - a single attempt can block for up to
-    [timeout] seconds, three attempts back to back at boot up to three
+    [timeout] seconds, several attempts back to back at boot several
     times that, and the caller's own watch_reset_button() call never runs
     at all while this function hasn't returned yet. A hold that starts and
     finishes entirely inside one of those windows would otherwise never be
