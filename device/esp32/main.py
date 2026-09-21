@@ -146,7 +146,7 @@ DEVICE_TYPE = "esp32"
 # The Pi reads this same line out of the copy it fetched from GitHub, which is
 # how "update available" is decided - so the string has to stay easy to find:
 # one line, plain quotes, nothing computed.
-FIRMWARE_VERSION = "1.11.14"
+FIRMWARE_VERSION = "1.11.15"
 
 # Where `POST /update` fetches new firmware from when it is not told
 # otherwise. Set it per module in config.json ("firmware_url"), or pass a url
@@ -220,6 +220,15 @@ FAILED_HEARTBEATS_BEFORE_RECONNECT = 3
 # join_wifi()), so this is a second, unattended line of defence rather
 # than the only way out.
 NO_NETWORK_TICKS_BEFORE_REBOOT = 30
+
+# The above never actually fires during the boot-time WiFi join any more:
+# join_wifi()'s own [attempts] is unlimited there now (see its docstring),
+# so it simply never returns to let the main loop's own no_network_ticks
+# counter run at all - a board that cannot join could otherwise retry
+# forever without ever reaching that safety net. Same five minutes, same
+# reasoning, just measured inside join_wifi() itself now, where the
+# unbounded retrying actually happens.
+JOIN_WIFI_REBOOT_AFTER_SECONDS = 300
 
 # How long the reset button must be held. Long enough that a knock or a stray
 # finger cannot wipe a board that is working.
@@ -787,9 +796,12 @@ def join_wifi(config, timeout=20, attempts=None, button=None, switches=None):
     problem is fixed an hour from now, and it should still come up on its
     own the moment that happens rather than sitting wherever it gave up.
     Safe to leave unbounded now in a way it was not before: the reset
-    button works mid-attempt (see below) and a 5-minute no-network reboot
-    is still there behind both of those, so "unlimited" no longer means
-    "no way out" if it needs to be interrupted.
+    button works mid-attempt (see below), and JOIN_WIFI_REBOOT_AFTER_SECONDS
+    below still reboots after five minutes of nothing but failed attempts -
+    measured in here specifically, not left to the main loop's own
+    no_network_ticks counter, since that one only ever runs after this
+    function returns, which an unlimited [attempts] may never do. So
+    "unlimited" retries, not "no way out" if it ever needs interrupting.
 
     Blinks STATUS_LED_PIN (_status_led, set by main() before this is ever
     called - both at boot and on every runtime reconnect attempt) for as
@@ -811,6 +823,7 @@ def join_wifi(config, timeout=20, attempts=None, button=None, switches=None):
     if not ssid:
         return None
 
+    started = time.time()
     attempt = 0
     while attempts is None or attempt < attempts:
         attempt += 1
@@ -870,6 +883,12 @@ def join_wifi(config, timeout=20, attempts=None, button=None, switches=None):
             print(" ok — %s" % wlan.ifconfig()[0])
             return wlan
         print(" failed (status %s)" % wlan.status())
+
+        if attempts is None and time.time() - started >= JOIN_WIFI_REBOOT_AFTER_SECONDS:
+            print("no successful connection in %d seconds - rebooting to "
+                  "reset the radio" % JOIN_WIFI_REBOOT_AFTER_SECONDS)
+            time.sleep(1)
+            machine.reset()
 
     return None
 
