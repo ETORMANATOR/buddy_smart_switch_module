@@ -45,25 +45,21 @@
 # ------------------------------------------------------------ first power --
 # A board with no config.json is unclaimed, and goes looking for the Pi:
 #
-#   1. It advertises over Bluetooth (BLE) for BLE_PROVISION_SECONDS, so the Pi
-#      can find and provision it directly with no WiFi involved at all -
-#      proximity is the only thing that lets somebody claim it this way, the
-#      same role Buddy-Modules' shared password played before. See
-#      ble_provision() below.
-#   2. If nothing claims it over BLE in time, it falls back to joining
-#      `Buddy-Modules`, whose name and password are below - hosted by its own
-#      bridge device, not the Pi's own radio, so this network being up says
-#      nothing about where the Pi itself actually is.
-#   3. Having joined that, it tells the Pi it exists, at pi_url (below) -
-#      resolved over mDNS if that is a ".local" name, since the gateway on
-#      this network is the bridge, not the Pi.
-#   4. The portal lists it. You enter the setup key and a name, and it is
-#      adopted — staying on this same network, with a device key of its own.
-#      There is no handover, so there is no moment when nobody can reach it.
+#   1. It advertises over Bluetooth (BLE), indefinitely - no deadline, so the
+#      Pi can find and provision it directly with no WiFi involved at all,
+#      whenever somebody gets around to it. Proximity is the only thing that
+#      lets somebody claim it this way, the same role Buddy-Modules' shared
+#      password played before. See ble_provision() below.
+#   2. The portal lists it. You enter a name and it is adopted - given the
+#      house WiFi's credentials and a device key of its own, then reboots
+#      onto that network. There is no handover, so there is no moment when
+#      nobody can reach it.
 #
-# If the Pi's network is not up, the board raises an access point of its own
-# (`Buddy-Setup-XXXX`) so it is reachable by something, and keeps checking for
-# the Pi every twenty seconds.
+# `Buddy-Modules` (join_setup_hotspot() below) is the older route this
+# replaced as the primary one - kept only for a board that is already
+# provisioned but cannot join its own saved WiFi, not for a fresh unclaimed
+# board any more, since step 1 above no longer ever gives up and falls back
+# to it.
 #
 # Writing a config.json over the USB cable skips all of this, and is the
 # quickest route when the module is already plugged in — see CONFIG.md.
@@ -150,7 +146,7 @@ DEVICE_TYPE = "esp32"
 # The Pi reads this same line out of the copy it fetched from GitHub, which is
 # how "update available" is decided - so the string has to stay easy to find:
 # one line, plain quotes, nothing computed.
-FIRMWARE_VERSION = "1.11.12"
+FIRMWARE_VERSION = "1.11.13"
 
 # Where `POST /update` fetches new firmware from when it is not told
 # otherwise. Set it per module in config.json ("firmware_url"), or pass a url
@@ -229,17 +225,6 @@ NO_NETWORK_TICKS_BEFORE_REBOOT = 30
 # finger cannot wipe a board that is working.
 RESET_HOLD_SECONDS = 3
 
-# How long an unclaimed board advertises over Bluetooth before giving up and
-# falling back to join_setup_hotspot(). BLE and WiFi share one radio on this
-# chip, so this has to actually end rather than run alongside anything else -
-# see ble_provision() below.
-#
-# Long enough for an actual person: scanning, reading the result, typing a
-# name and clicking Connect easily takes more than the 20 seconds this was
-# first measured at - a board that gives up and starts hunting for
-# Buddy-Modules mid-adoption is one BleakDeviceNotFoundError away from a
-# confusing "it was right there a second ago."
-BLE_PROVISION_SECONDS = 120
 
 
 # --------------------------------------------------------------- naming --
@@ -684,17 +669,21 @@ def _ble_advertisement(name):
     return bytes(payload)
 
 
-def ble_provision(config, switches, timeout=BLE_PROVISION_SECONDS, light=None):
-    """Advertises this board over BLE and waits up to [timeout] seconds to
-    be provisioned. True the moment credentials are accepted and saved -
-    config.json is already written when this returns, same as after an
-    HTTP /provision; the caller still has to reboot onto the new network.
+def ble_provision(config, switches, button=None, light=None):
+    """Advertises this board over BLE for as long as it takes to be
+    provisioned - no deadline, see the loop below for why. True the moment
+    credentials are accepted and saved - config.json is already written
+    when this returns, same as after an HTTP /provision; the caller still
+    has to reboot onto the new network.
 
     [light] (RESET_LIGHT_PIN) blinks for as long as this is waiting to be
     provisioned - the same pin the reset button lights solid, so "blinking"
-    versus "solid" is what tells the two situations apart at a glance. No
-    conflict between them in practice: this runs once, before the reset
-    button is ever watched (see main()), never alongside it.
+    versus "solid" is what tells the two situations apart at a glance.
+
+    [button] (RESET_PIN) is watched here too, same reasoning as
+    join_wifi()'s own [button] parameter - this can now block for a very
+    long time (indefinitely, if nobody ever adopts it), and the caller's
+    own watch_reset_button() call never runs at all until this returns.
     """
     ble = bluetooth.BLE()
     ble.active(True)
@@ -741,14 +730,24 @@ def ble_provision(config, switches, timeout=BLE_PROVISION_SECONDS, light=None):
     ble.irq(irq)
 
     ble.gap_advertise(100_000, adv_payload)
-    print("BLE advertising as %s (%ds to be provisioned)" % (name, timeout))
+    print("BLE advertising as %s (until provisioned)" % name)
 
-    deadline = time.time() + timeout
+    # No deadline any more - this used to give up after 120 seconds and
+    # fall back to joining the Pi's own setup hotspot, which does not exist
+    # any more (that route predates BLE provisioning becoming the primary
+    # one - see the file header) and always fails immediately, so a board
+    # that missed its window used to end up stuck in the no-network loop
+    # for no reason. Keeps advertising for as long as it takes instead.
     blink = False
-    while time.time() < deadline and not received:
+    held_since = None
+    while not received:
         if light is not None:
             blink = not blink
             light.value(1 if blink else 0)
+        # Watched here for the same reason join_wifi() watches it during
+        # its own wait - this can now block indefinitely, and the caller's
+        # own watch_reset_button() never runs at all until this returns.
+        held_since = watch_reset_button(button, held_since, switches)
         time.sleep(0.2)
     if light is not None:
         light.value(0)
@@ -1486,7 +1485,7 @@ def main():
         if is_provisioned(config):
             print("could not join '%s' - falling back to the Pi's network"
                   % config.get("wifi_ssid", ""))
-        elif ble_provision(config, switches, light=_reset_light):
+        elif ble_provision(config, switches, button=button, light=_reset_light):
             print("provisioned over Bluetooth - restarting onto the new network")
             time.sleep(1)
             # machine.reset() alone was measured, live, to not be enough: the
